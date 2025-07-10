@@ -48,7 +48,7 @@
 #include "async_web_server_cpp/http_reply.hpp"
 
 using namespace std::chrono_literals;
-using namespace boost::placeholders;  // NOLINT
+using namespace std::placeholders;  // NOLINT
 
 namespace web_video_server
 {
@@ -170,7 +170,9 @@ bool WebVideoServer::handle_stream(
   async_web_server_cpp::HttpConnectionPtr connection, const char * begin,
   const char * end)
 {
+  RCLCPP_INFO_STREAM(get_logger(), "Request: " << request.uri);  
   std::string type = request.get_query_param_value_or_default("type", default_stream_type_);
+  RCLCPP_INFO_STREAM(get_logger(), "  Received request for stream of type: " << type);  
   if (stream_types_.find(type) != stream_types_.end()) {
     std::string topic = request.get_query_param_value_or_default("topic", "");
     // Fallback for topics without corresponding compressed topics
@@ -198,6 +200,7 @@ bool WebVideoServer::handle_stream(
         type = "mjpeg";
       }
     }
+    RCLCPP_INFO_STREAM(get_logger(), "  Starting stream of type: " << type);
     std::shared_ptr<ImageStreamer> streamer = stream_types_[type]->create_streamer(
       request, connection, shared_from_this());
     streamer->start();

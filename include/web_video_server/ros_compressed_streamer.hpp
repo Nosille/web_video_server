@@ -39,6 +39,8 @@
 #include "async_web_server_cpp/http_connection.hpp"
 #include "web_video_server/multipart_stream.hpp"
 
+#include "web_video_server/subscribers/image_compressed_subscriber.hpp"
+
 namespace web_video_server
 {
 
@@ -50,22 +52,18 @@ public:
     async_web_server_cpp::HttpConnectionPtr connection,
     rclcpp::Node::SharedPtr node);
   ~RosCompressedStreamer();
-  virtual void start();
   virtual void restreamFrame(std::chrono::duration<double> max_age);
 
 protected:
+  virtual void sendImage(const cv::Mat &, const std::chrono::steady_clock::time_point & time);
   virtual void sendImage(
     const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg,
     const std::chrono::steady_clock::time_point & time);
 
 private:
-  void imageCallback(const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg);
+  void compressedImageCallback(const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg);
   MultipartStream stream_;
-  rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr image_sub_;
-  std::chrono::steady_clock::time_point last_frame_;
   sensor_msgs::msg::CompressedImage::ConstSharedPtr last_msg;
-  std::mutex send_mutex_;
-  std::string qos_profile_name_;
 };
 
 class RosCompressedStreamerType : public ImageStreamerType
@@ -75,6 +73,7 @@ public:
     const async_web_server_cpp::HttpRequest & request,
     async_web_server_cpp::HttpConnectionPtr connection,
     rclcpp::Node::SharedPtr node);
+    
   std::string create_viewer(const async_web_server_cpp::HttpRequest & request);
 };
 
