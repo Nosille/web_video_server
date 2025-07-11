@@ -287,6 +287,7 @@ bool WebVideoServer::handle_list_streams(
 {
   std::vector<std::string> image_topics;
   std::vector<std::string> camera_info_topics;
+  std::vector<std::string> pointcloud2_topics;
   auto tnat = get_topic_names_and_types();
   for (auto topic_and_types : tnat) {
     if (topic_and_types.second.size() > 1) {
@@ -300,6 +301,8 @@ bool WebVideoServer::handle_list_streams(
       image_topics.push_back(topic_name);
     } else if (topic_type == "sensor_msgs/msg/CameraInfo") {
       camera_info_topics.push_back(topic_name);
+    } else if (topic_type == "sensor_msgs/msg/PointCloud2") {
+      pointcloud2_topics.push_back(topic_name);
     }
   }
 
@@ -369,6 +372,31 @@ bool WebVideoServer::handle_list_streams(
 
     image_topic_itr = image_topics.erase(image_topic_itr);
   }
+  connection->write("</ul>");
+
+  connection->write(
+    "<html>"
+    "<head><title>ROS PointCloud2 Topic List</title></head>"
+    "<body><h1>Available ROS PointCloud2 Topics:</h1>");
+  //Add the pointcloud2 topics
+  connection->write("<ul>");
+  std::vector<std::string>::iterator pointcloud2_topic_itr = pointcloud2_topics.begin();
+  for (; pointcloud2_topic_itr != pointcloud2_topics.end();) {
+    connection->write("<li><a href=\"/stream_viewer?topic=");
+    connection->write(*pointcloud2_topic_itr);
+    connection->write("\">");
+    connection->write(*pointcloud2_topic_itr);
+    connection->write("</a> (");
+    connection->write("<a href=\"/snapshot?topic=");
+    connection->write(*pointcloud2_topic_itr);
+    connection->write("\">Snapshot</a>)");
+    connection->write("</li>");
+
+    pointcloud2_topic_itr = pointcloud2_topics.erase(pointcloud2_topic_itr);
+  }
+  connection->write("</ul>");
+
+  //End
   connection->write("</ul></body></html>");
   return true;
 }
