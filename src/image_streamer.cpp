@@ -47,7 +47,6 @@ ImageStreamer::ImageStreamer(
 : connection_(connection), request_(request), node_(node), inactive_(false), initialized_(false)
 {
   subscriber_types_["image_transport"] = std::shared_ptr<SubscriberType>(new ImageTransportSubscriberType());
-  // subscriber_types_["image_compressed"] = std::shared_ptr<SubscriberType>(new ImageCompressedSubscriberType());
   subscriber_types_["pointcloud2"] = std::shared_ptr<SubscriberType>(new PointCloud2SubscriberType());
   
   topic_ = request.get_query_param_value_or_default("topic", "");
@@ -77,11 +76,6 @@ void ImageStreamer::start()
 
       if (topic_type == "sensor_msgs/msg/Image") {
         subscriber_ = subscriber_types_["image_transport"]->create_subscriber(node_);
-        subscriber_->subscribe(request_, topic_, 
-                std::bind(&ImageStreamer::imageCallback, this, std::placeholders::_1));
-      }
-      else if (topic_type == "sensor_msgs/msg/CompressedImage") {
-        subscriber_ = subscriber_types_["image_compressed"]->create_subscriber(node_);
         subscriber_->subscribe(request_, topic_, 
                 std::bind(&ImageStreamer::imageCallback, this, std::placeholders::_1));
       }

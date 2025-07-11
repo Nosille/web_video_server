@@ -69,7 +69,6 @@ add_library(${PROJECT_NAME} SHARED
   src/subscribers/ros_subscriber.cpp
   src/subscribers/pointcloud2_subscriber.cpp
   src/subscribers/image_transport_subscriber.cpp
-  src/subscribers/image_compressed_subscriber.cpp
 )
 
 ament_target_dependencies(${PROJECT_NAME} rclcpp tf2 tf2_ros tf2_sensor_msgs tf2_geometry_msgs)

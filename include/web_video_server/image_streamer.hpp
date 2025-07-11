@@ -37,14 +37,12 @@
 #include <opencv2/opencv.hpp>
 
 #include "rclcpp/rclcpp.hpp"
-#include "image_transport/image_transport.hpp"
-#include "image_transport/transport_hints.hpp"
+
 #include "async_web_server_cpp/http_server.hpp"
 #include "async_web_server_cpp/http_request.hpp"
 
 #include "web_video_server/subscribers/pointcloud2_subscriber.hpp"
 #include "web_video_server/subscribers/image_transport_subscriber.hpp"
-#include "web_video_server/subscribers/image_compressed_subscriber.hpp"
 
 namespace web_video_server
 {

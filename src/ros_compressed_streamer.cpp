@@ -29,13 +29,6 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "web_video_server/ros_compressed_streamer.hpp"
-#include "async_web_server_cpp/http_reply.hpp"
-
-#ifdef CV_BRIDGE_USES_OLD_HEADERS
-#include "cv_bridge/cv_bridge.h"
-#else
-#include "cv_bridge/cv_bridge.hpp"
-#endif
 
 namespace web_video_server
 {
@@ -46,12 +39,39 @@ RosCompressedStreamer::RosCompressedStreamer(
 : ImageStreamer(request, connection, node), stream_(connection)
 {
   stream_.sendInitialHeader();
+  qos_profile_name_ = request.get_query_param_value_or_default("qos_profile", "default");
 }
 
 RosCompressedStreamer::~RosCompressedStreamer()
 {
   this->inactive_ = true;
   std::scoped_lock lock(send_mutex_);  // protects sendImage.
+}
+
+void RosCompressedStreamer::start()
+{
+  const std::string compressed_topic = topic_ + "/compressed";
+
+  // Get QoS profile from query parameter
+  RCLCPP_INFO(
+    node_->get_logger(), "Streaming topic %s with QoS profile %s",
+    compressed_topic.c_str(), qos_profile_name_.c_str());
+  auto qos_profile = get_qos_profile_from_name(qos_profile_name_);
+  if (!qos_profile) {
+    qos_profile = rmw_qos_profile_default;
+    RCLCPP_ERROR(
+      node_->get_logger(),
+      "Invalid QoS profile %s specified. Using default profile.",
+      qos_profile_name_.c_str());
+  }
+
+  // Create subscriber
+  const auto qos = rclcpp::QoS(
+    rclcpp::QoSInitialization(qos_profile.value().history, 1),
+    qos_profile.value());
+  image_sub_ = node_->create_subscription<sensor_msgs::msg::CompressedImage>(
+    compressed_topic, qos,
+    std::bind(&RosCompressedStreamer::compressedImageCallback, this, std::placeholders::_1));
 }
 
 void RosCompressedStreamer::restreamFrame(std::chrono::duration<double> max_age)
@@ -63,23 +83,16 @@ void RosCompressedStreamer::restreamFrame(std::chrono::duration<double> max_age)
   if (last_frame_ + max_age < std::chrono::steady_clock::now()) {
     std::scoped_lock lock(send_mutex_);
     // don't update last_frame, it may remain an old value.
-    sendImage(last_msg, std::chrono::steady_clock::now());
+    sendCompressedImage(last_msg, std::chrono::steady_clock::now());
   }
 }
 
 void RosCompressedStreamer::sendImage(const cv::Mat & img, const std::chrono::steady_clock::time_point & time)
 {
-  // std::vector<int> encode_params;
-  // encode_params.push_back(cv::IMWRITE_PNG_COMPRESSION);
-  // encode_params.push_back(quality_);
-
-  // std::vector<uchar> encoded_buffer;
-  // cv::imencode(".png", img, encoded_buffer, encode_params);
-
-  // stream_.sendPartAndClear(time, "image/png", encoded_buffer);
+  /// sendImage is replaced by sendCompressedImage for this streamer
 }
 
-void RosCompressedStreamer::sendImage(
+void RosCompressedStreamer::sendCompressedImage(
   const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg,
   const std::chrono::steady_clock::time_point & time)
 {
@@ -124,7 +137,7 @@ void RosCompressedStreamer::compressedImageCallback(
   std::scoped_lock lock(send_mutex_);  // protects last_msg and last_frame
   last_msg = msg;
   last_frame_ = std::chrono::steady_clock::now();
-  sendImage(last_msg, last_frame_);
+  sendCompressedImage(last_msg, last_frame_);
 }
 
 
