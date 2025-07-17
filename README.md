@@ -244,6 +244,9 @@ gst-launch-1.0 rtspsrc location=rtsp://localhost:8554/stream?topic=/image_raw\&t
 # Basic playback
 ffplay rtsp://localhost:8554/stream?topic=/image_raw\&type=h264
 
+# Low latency playback (recommended)
+ffplay -fflags nobuffer -flags low_delay rtsp://localhost:8554/stream?topic=/image_raw\&type=h264
+
 # With TCP transport (more reliable)
 ffplay -rtsp_transport tcp rtsp://localhost:8554/stream?topic=/image_raw\&type=h264
 ```
