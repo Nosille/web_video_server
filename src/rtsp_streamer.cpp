@@ -631,28 +631,37 @@ void RTSPStreamer::sendH264NALUnit(const uint8_t* nal_data, size_t nal_size, uin
     sendRTPPacket(nal_data, nal_size, true, timestamp);
   } else {
     // Fragmented NAL unit (FU-A)
-    size_t offset = 1;
     uint8_t nal_header = nal_data[0];
-    nal_data += 1;
-    nal_size -= 1;
-
-    while (offset < nal_size) {
-      size_t fragment_size = std::min(max_rtp_payload_size, nal_size - offset);
-      uint8_t fu_indicator = (nal_header & 0xE0) | 28;
-      uint8_t fu_header = (nal_header & 0x1F);
-
-      if (offset == 1) {
+    const uint8_t* nal_payload = nal_data + 1;
+    size_t nal_payload_size = nal_size - 1;
+    
+    // FU-A indicator: F=0, NRI from original NAL, Type=28 (FU-A)
+    uint8_t fu_indicator = (nal_header & 0xE0) | NALU_TYPE_FU_A;
+    
+    size_t offset = 0;
+    bool first_fragment = true;
+    
+    while (offset < nal_payload_size) {
+      size_t fragment_size = std::min(max_rtp_payload_size - 2, nal_payload_size - offset);  // -2 for FU headers
+      
+      // FU-A header: S, E, R, Type from original NAL
+      uint8_t fu_header = (nal_header & 0x1F);  // NAL unit type
+      
+      if (first_fragment) {
         fu_header |= 0x80;  // Start bit
-      } else if (offset + fragment_size >= nal_size) {
+        first_fragment = false;
+      }
+      
+      if (offset + fragment_size >= nal_payload_size) {
         fu_header |= 0x40;  // End bit
       }
 
       std::vector<uint8_t> rtp_packet;
       rtp_packet.push_back(fu_indicator);
       rtp_packet.push_back(fu_header);
-      rtp_packet.insert(rtp_packet.end(), nal_data + offset, nal_data + offset + fragment_size);
+      rtp_packet.insert(rtp_packet.end(), nal_payload + offset, nal_payload + offset + fragment_size);
 
-      sendRTPPacket(rtp_packet.data(), rtp_packet.size(), (offset + fragment_size >= nal_size), timestamp);
+      sendRTPPacket(rtp_packet.data(), rtp_packet.size(), (offset + fragment_size >= nal_payload_size), timestamp);
 
       offset += fragment_size;
     }
