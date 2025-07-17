@@ -88,6 +88,10 @@ public:
   std::string getTopic() const { return topic_; }
   std::string getStreamUrl() const;
   bool isActive() const { return active_; }
+  
+  // Dynamic topic switching
+  void switchTopic(const std::string& new_topic);
+  bool isStreaming() const { return streaming_; }
 
 private:
   void rtspServerThread();

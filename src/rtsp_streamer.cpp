@@ -179,6 +179,69 @@ void RTSPStreamer::start()
   RCLCPP_INFO(node_->get_logger(), "RTSP stream started on port %d for topic %s", rtsp_port_, topic_.c_str());
 }
 
+void RTSPStreamer::switchTopic(const std::string& new_topic)
+{
+  if (topic_ == new_topic) {
+    return; // No change needed
+  }
+  
+  RCLCPP_INFO(node_->get_logger(), "Switching RTSP stream from topic %s to %s", topic_.c_str(), new_topic.c_str());
+  
+  // Update topic
+  topic_ = new_topic;
+  
+  // Reset subscriber
+  subscriber_.reset();
+  
+  // Clear frame queue
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    while (!frame_queue_.empty()) {
+      frame_queue_.pop();
+    }
+  }
+  
+  // Cleanup and reinitialize encoder to reset state
+  cleanupEncoder();
+  if (streaming_) {
+    initializeEncoder();
+  }
+  
+  // Determine new subscriber type
+  std::string subscriber_type = "image";  // Default to image
+  
+  // Try to determine subscriber type based on topic
+  auto tnat = node_->get_topic_names_and_types();
+  for (const auto& topic_and_types : tnat) {
+    if (topic_and_types.first == topic_) {
+      if (!topic_and_types.second.empty()) {
+        const std::string& topic_type = topic_and_types.second[0];
+        if (topic_type == "sensor_msgs/msg/PointCloud2") {
+          subscriber_type = "pointcloud2";
+        }
+      }
+      break;
+    }
+  }
+  
+  // Create new subscriber for the new topic
+  if (subscriber_types_.find(subscriber_type) != subscriber_types_.end()) {
+    subscriber_ = subscriber_types_[subscriber_type]->create_subscriber(node_);
+    
+    // Create a dummy HTTP request for subscriber configuration
+    async_web_server_cpp::HttpRequest dummy_request;
+    dummy_request.query = "qos_profile=default";
+    
+    subscriber_->subscribe(
+      dummy_request,
+      topic_,
+      std::bind(&RTSPStreamer::imageCallback, this, std::placeholders::_1)
+    );
+  }
+  
+  RCLCPP_INFO(node_->get_logger(), "RTSP stream switched to topic %s", topic_.c_str());
+}
+
 void RTSPStreamer::stop()
 {
   if (!active_) {
@@ -1017,10 +1080,31 @@ std::shared_ptr<RTSPStreamer> RTSPStreamerManager::createStreamer(
 {
   std::lock_guard<std::mutex> lock(streamers_mutex_);
   
-  // Check if streamer already exists
+  // Check if streamer already exists for this topic
   auto it = streamers_.find(topic);
   if (it != streamers_.end() && it->second->isActive()) {
     return it->second;
+  }
+  
+  // Look for an existing active streamer that we can repurpose
+  // This enables dynamic topic switching on the same RTSP port
+  std::shared_ptr<RTSPStreamer> existing_streamer = nullptr;
+  for (const auto& pair : streamers_) {
+    if (pair.second->isActive() && pair.second->isStreaming()) {
+      // Found an active streamer - we can switch it to the new topic
+      existing_streamer = pair.second;
+      
+      // Remove the old topic entry
+      streamers_.erase(pair.first);
+      break;
+    }
+  }
+  
+  if (existing_streamer) {
+    // Switch the existing streamer to the new topic
+    existing_streamer->switchTopic(topic);
+    streamers_[topic] = existing_streamer;
+    return existing_streamer;
   }
   
   // Assign port if not specified
@@ -1028,6 +1112,7 @@ std::shared_ptr<RTSPStreamer> RTSPStreamerManager::createStreamer(
     rtsp_port = next_port_++;
   }
   
+  // Create new streamer
   auto streamer = std::make_shared<RTSPStreamer>(node_, topic, codec, rtsp_port);
   streamers_[topic] = streamer;
   
