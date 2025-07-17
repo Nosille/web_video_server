@@ -214,9 +214,14 @@ To create an RTSP stream, make an HTTP request to:
 http://localhost:8080/rtsp_stream?topic=/camera/image_raw
 ```
 
+Using curl:
+```bash
+curl "http://localhost:8080/rtsp_stream?topic=/image_raw&bitrate=1000000"
+```
+
 This will return a JSON response with the RTSP URL:
 ```json
-{"rtsp_url": "rtsp://localhost:8554/camera/image_raw"}
+{"rtsp_url": "rtsp://localhost:8554/stream?topic=/image_raw&type=h264"}
 ```
 
 #### RTSP URL Parameters
