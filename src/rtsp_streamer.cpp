@@ -227,7 +227,7 @@ void RTSPStreamer::stop()
 
 std::string RTSPStreamer::getStreamUrl() const
 {
-  return "rtsp://localhost:" + std::to_string(rtsp_port_) + "/" + topic_;
+  return "rtsp://localhost:" + std::to_string(rtsp_port_) + "/stream?topic=" + topic_ + "&type=" + codec_name_;
 }
 
 void RTSPStreamer::rtspServerThread()
@@ -524,6 +524,7 @@ void RTSPStreamer::imageCallback(const sensor_msgs::msg::Image::ConstPtr & msg)
   
   cv_bridge::CvImagePtr cv_ptr;
   try {
+    // First try to convert to BGR8
     cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
   } catch (cv_bridge::Exception& e) {
     RCLCPP_ERROR(node_->get_logger(), "cv_bridge exception: %s", e.what());
@@ -605,37 +606,117 @@ void RTSPStreamer::encodeAndSendFrame(const cv::Mat & frame)
       break;
     }
     
-    // Send RTP packet to all clients
-    {
-      std::lock_guard<std::mutex> lock(clients_mutex_);
-      for (auto& client_pair : clients_) {
-        auto& client = client_pair.second;
-        if (client->active && client->rtp_port > 0) {
-          // Create RTP packet (simplified)
-          // In a real implementation, you'd need proper RTP packetization
-          // For now, we'll just send the raw H.264 data
-          
-          struct sockaddr_in client_addr;
-          client_addr.sin_family = AF_INET;
-          client_addr.sin_port = htons(client->rtp_port);
-          inet_pton(AF_INET, client->client_ip.c_str(), &client_addr.sin_addr);
-          
-          int rtp_socket = socket(AF_INET, SOCK_DGRAM, 0);
-          if (rtp_socket >= 0) {
-            sendto(rtp_socket, packet_->data, packet_->size, 0,
-                   (struct sockaddr*)&client_addr, sizeof(client_addr));
-            close(rtp_socket);
-          }
-        }
-      }
-    }
+    // Send H.264 NAL units as RTP packets
+    sendH264NALUnit(packet_->data, packet_->size, rtp_timestamp_);
     
-    rtp_timestamp_ += 3000; // Increment timestamp
-    rtp_sequence_++;
+    rtp_timestamp_ += 3000; // Increment timestamp (90kHz clock)
     
     av_packet_unref(packet_);
   }
 }
+
+void RTSPStreamer::sendH264NALUnit(const uint8_t* nal_data, size_t nal_size, uint32_t timestamp) {
+  const size_t max_rtp_payload_size = 1400;  // Typical MTU size minus headers
+
+  if (nal_size <= max_rtp_payload_size) {
+    // Single NAL unit
+    sendRTPPacket(nal_data, nal_size, true, timestamp);
+  } else {
+    // Fragmented NAL unit (FU-A)
+    size_t offset = 1;
+    uint8_t nal_header = nal_data[0];
+    nal_data += 1;
+    nal_size -= 1;
+
+    while (offset < nal_size) {
+      size_t fragment_size = std::min(max_rtp_payload_size, nal_size - offset);
+      uint8_t fu_indicator = (nal_header & 0xE0) | 28;
+      uint8_t fu_header = (nal_header & 0x1F);
+
+      if (offset == 1) {
+        fu_header |= 0x80;  // Start bit
+      } else if (offset + fragment_size >= nal_size) {
+        fu_header |= 0x40;  // End bit
+      }
+
+      std::vector<uint8_t> rtp_packet;
+      rtp_packet.push_back(fu_indicator);
+      rtp_packet.push_back(fu_header);
+      rtp_packet.insert(rtp_packet.end(), nal_data + offset, nal_data + offset + fragment_size);
+
+      sendRTPPacket(rtp_packet.data(), rtp_packet.size(), (offset + fragment_size >= nal_size), timestamp);
+
+      offset += fragment_size;
+    }
+  }
+}
+
+
+void RTSPStreamer::sendRTPPacket(const uint8_t* data, size_t size, bool marker, uint32_t timestamp) {
+  RTSPStreamer::RTPHeader header = createRTPHeader(marker, timestamp);
+
+  // Send RTP packet to all clients
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  for (auto& client_pair : clients_) {
+    auto& client = client_pair.second;
+    if (client->active && client->rtp_port > 0) {
+      struct sockaddr_in client_addr;
+      client_addr.sin_family = AF_INET;
+      client_addr.sin_port = htons(client->rtp_port);
+      inet_pton(AF_INET, client->client_ip.c_str(), &client_addr.sin_addr);
+
+      int rtp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+      if (rtp_socket >= 0) {
+        std::vector<uint8_t> packet_data(sizeof(RTSPStreamer::RTPHeader) + size);
+        std::memcpy(packet_data.data(), &header, sizeof(RTSPStreamer::RTPHeader));
+        std::memcpy(packet_data.data() + sizeof(RTSPStreamer::RTPHeader), data, size);
+
+        sendto(rtp_socket, packet_data.data(), packet_data.size(), 0,
+               (struct sockaddr*)&client_addr, sizeof(client_addr));
+        close(rtp_socket);
+      }
+    }
+  }
+}
+
+
+RTSPStreamer::RTPHeader RTSPStreamer::createRTPHeader(bool marker, uint32_t timestamp) {
+  RTPHeader header;
+  header.version_padding_extension_csrc_count = (2 << 6);  // Version 2, no padding, no extension
+  header.marker_payload_type = (marker << 7) | 96;  // Marker bit and payload type 96
+  header.sequence_number = htons(rtp_sequence_++);
+  header.timestamp = htonl(timestamp);
+  header.ssrc = htonl(rtp_ssrc_);
+  return header;
+}
+
+
+std::vector<uint8_t> RTSPStreamer::findNALUnits(const uint8_t* data, size_t size) {
+  std::vector<uint8_t> nal_units;
+  size_t start = 0;
+
+  while (start < size) {
+    // Look for the start code
+    size_t end = start;
+    while (end < size - 4) {
+      if (data[end] == 0x00 && data[end + 1] == 0x00 && data[end + 2] == 0x00 && data[end + 3] == 0x01) {
+        break;
+      }
+      end++;
+    }
+    
+    if (end < size - 4) {
+      nal_units.push_back(end);
+      start = end + 4;
+    } else {
+      nal_units.push_back(size);
+      break;
+    }
+  }
+
+  return nal_units;
+}
+
 
 void RTSPStreamer::initializeEncoder()
 {

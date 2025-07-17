@@ -431,12 +431,25 @@ bool WebVideoServer::handle_rtsp_stream(
   }
 
   std::string topic = request.get_query_param_value_or_default("topic", "");
-  std::string codec = request.get_query_param_value_or_default("codec", "h264");
+  std::string type = request.get_query_param_value_or_default("type", "h264");
   
   if (topic.empty()) {
     async_web_server_cpp::HttpReply::stock_reply(async_web_server_cpp::HttpReply::bad_request)(
       request, connection, nullptr, nullptr);
     return true;
+  }
+
+  // Map HTTP stream types to RTSP codec names
+  std::string codec = "libx264"; // default
+  if (type == "h264") {
+    codec = "libx264";
+  } else if (type == "vp8") {
+    codec = "libvpx";
+  } else if (type == "vp9") {
+    codec = "libvpx-vp9";
+  } else {
+    // For other types like mjpeg, png, etc., use default h264
+    codec = "libx264";
   }
 
   // Create or get existing RTSP streamer
@@ -450,9 +463,9 @@ bool WebVideoServer::handle_rtsp_stream(
   // Start the streamer
   streamer->start();
 
-  // Return JSON response with stream URL
+  // Return JSON response with stream URL that mirrors HTTP pattern
   std::stringstream json_response;
-  json_response << "{\"rtsp_url\":\"" << streamer->getStreamUrl() << "\"}"; 
+  json_response << "{\"rtsp_url\":\"rtsp://localhost:" << rtsp_port_ << "/stream?topic=" << topic << "&type=" << type << "\"}"; 
 
   async_web_server_cpp::HttpReply::builder(async_web_server_cpp::HttpReply::ok)
   .header("Connection", "close")
