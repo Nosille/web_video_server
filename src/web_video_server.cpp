@@ -63,6 +63,11 @@ WebVideoServer::WebVideoServer(const rclcpp::NodeOptions & options)
   declare_parameter("server_threads", 1);
   declare_parameter("publish_rate", -1.0);
   declare_parameter("default_stream_type", "mjpeg");
+  
+  // RTSP parameters
+  declare_parameter("rtsp_enabled", true);
+  declare_parameter("rtsp_port", 8554);
+  declare_parameter("rtsp_address", "0.0.0.0");
 
   get_parameter("port", port_);
   get_parameter("verbose", verbose_);
@@ -71,6 +76,11 @@ WebVideoServer::WebVideoServer(const rclcpp::NodeOptions & options)
   get_parameter("server_threads", server_threads);
   get_parameter("publish_rate", publish_rate_);
   get_parameter("default_stream_type", default_stream_type_);
+  
+  // Get RTSP parameters
+  get_parameter("rtsp_enabled", rtsp_enabled_);
+  get_parameter("rtsp_port", rtsp_port_);
+  get_parameter("rtsp_address", rtsp_address_);
 
   stream_types_["mjpeg"] = std::make_shared<MjpegStreamerType>();
   stream_types_["png"] = std::make_shared<PngStreamerType>();
@@ -91,6 +101,9 @@ WebVideoServer::WebVideoServer(const rclcpp::NodeOptions & options)
   handler_group_.addHandlerForPath(
     "/snapshot",
     boost::bind(&WebVideoServer::handle_snapshot, this, _1, _2, _3, _4));
+  handler_group_.addHandlerForPath(
+    "/rtsp_stream",
+    boost::bind(&WebVideoServer::handle_rtsp_stream, this, _1, _2, _3, _4));
 
   try {
     server_.reset(
@@ -114,6 +127,12 @@ WebVideoServer::WebVideoServer(const rclcpp::NodeOptions & options)
   }
 
   cleanup_timer_ = create_wall_timer(500ms, [this]() {cleanup_inactive_streams();});
+
+  // Initialize RTSP manager if enabled
+  if (rtsp_enabled_) {
+    rtsp_manager_ = std::make_shared<RTSPStreamerManager>(shared_from_this());
+    RCLCPP_INFO(get_logger(), "RTSP streaming enabled on %s:%d", rtsp_address_.c_str(), rtsp_port_);
+  }
 
   server_->run();
 }
@@ -398,6 +417,52 @@ bool WebVideoServer::handle_list_streams(
 
   //End
   connection->write("</ul></body></html>");
+  return true;
+}
+
+bool WebVideoServer::handle_rtsp_stream(
+  const async_web_server_cpp::HttpRequest & request,
+  async_web_server_cpp::HttpConnectionPtr connection, const char * /* begin */,
+  const char * /* end */)
+{
+  if (!rtsp_enabled_ || !rtsp_manager_) {
+    async_web_server_cpp::HttpReply::stock_reply(async_web_server_cpp::HttpReply::not_found)(
+      request, connection, nullptr, nullptr);
+    return true;
+  }
+
+  std::string topic = request.get_query_param_value_or_default("topic", "");
+  std::string codec = request.get_query_param_value_or_default("codec", "h264");
+  
+  if (topic.empty()) {
+    async_web_server_cpp::HttpReply::stock_reply(async_web_server_cpp::HttpReply::bad_request)(
+      request, connection, nullptr, nullptr);
+    return true;
+  }
+
+  // Create or get existing RTSP streamer
+  auto streamer = rtsp_manager_->createStreamer(topic, codec);
+  if (!streamer) {
+    async_web_server_cpp::HttpReply::stock_reply(async_web_server_cpp::HttpReply::internal_server_error)(
+      request, connection, nullptr, nullptr);
+    return true;
+  }
+
+  // Start the streamer
+  streamer->start();
+
+  // Return JSON response with stream URL
+  std::stringstream json_response;
+  json_response << "{\"rtsp_url\":\"" << streamer->getStreamUrl() << "\"}"; 
+
+  async_web_server_cpp::HttpReply::builder(async_web_server_cpp::HttpReply::ok)
+  .header("Connection", "close")
+  .header("Server", "web_video_server")
+  .header("Content-type", "application/json")
+  .header("Access-Control-Allow-Origin", "*")
+  .write(connection);
+
+  connection->write(json_response.str());
   return true;
 }
 

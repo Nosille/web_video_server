@@ -43,6 +43,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "web_video_server/image_streamer.hpp"
+#include "web_video_server/rtsp_streamer.hpp"
 #include "async_web_server_cpp/http_server.hpp"
 #include "async_web_server_cpp/http_request.hpp"
 #include "async_web_server_cpp/http_connection.hpp"
@@ -93,6 +94,11 @@ public:
     async_web_server_cpp::HttpConnectionPtr connection,
     const char * begin, const char * end);
 
+  bool handle_rtsp_stream(
+    const async_web_server_cpp::HttpRequest & request,
+    async_web_server_cpp::HttpConnectionPtr connection,
+    const char * begin, const char * end);
+
 private:
   void restreamFrames(std::chrono::duration<double> max_age);
   void cleanup_inactive_streams();
@@ -106,6 +112,11 @@ private:
   std::string address_;
   bool verbose_;
   std::string default_stream_type_;
+  
+  // RTSP Parameters
+  bool rtsp_enabled_;
+  int rtsp_port_;
+  std::string rtsp_address_;
 
   std::shared_ptr<async_web_server_cpp::HttpServer> server_;
   async_web_server_cpp::HttpRequestHandlerGroup handler_group_;
@@ -113,6 +124,9 @@ private:
   std::vector<std::shared_ptr<ImageStreamer>> image_subscribers_;
   std::map<std::string, std::shared_ptr<ImageStreamerType>> stream_types_;
   std::mutex subscriber_mutex_;
+  
+  // RTSP streaming
+  std::shared_ptr<RTSPStreamerManager> rtsp_manager_;
 };
 
 }  // namespace web_video_server

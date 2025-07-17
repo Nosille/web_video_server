@@ -21,6 +21,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 
 find_package(OpenCV REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
+find_package(Threads REQUIRED)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(avcodec libavcodec REQUIRED)
@@ -65,6 +66,7 @@ add_library(${PROJECT_NAME} SHARED
   src/jpeg_streamers.cpp
   src/png_streamers.cpp
   src/utils.cpp
+  src/rtsp_streamer.cpp
 
   src/subscribers/ros_subscriber.cpp
   src/subscribers/pointcloud2_subscriber.cpp
@@ -88,6 +90,7 @@ target_link_libraries(${PROJECT_NAME}
   ${avformat_LIBRARIES}
   ${avutil_LIBRARIES}
   ${swscale_LIBRARIES}
+  Threads::Threads
 )
 
 ## Declare a cpp executable

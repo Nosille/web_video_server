@@ -11,10 +11,12 @@ This node provides HTTP streaming of ROS image topics in various formats, making
   - H264 (MP4)
   - PNG streams
   - ROS compressed image topics
+- **NEW: RTSP streaming support** for low-latency video streaming
 - Adjustable quality, size, and other streaming parameters
 - Web interface to browse available image topics
 - Single image snapshot capability
 - Support for different QoS profiles in ROS 2
+- Support for PointCloud2 topics (converted to depth images)
 
 ## Installation
 
@@ -89,6 +91,9 @@ ros2 run web_video_server web_video_server
 | `verbose` | bool | false | true, false | Enable verbose logging |
 | `default_stream_type` | string | "mjpeg" | "mjpeg", "vp8", "vp9", "h264", "png", "ros_compressed" | Default format for video streams |
 | `publish_rate` | double | -1.0 | -1.0 or positive value | Rate for republishing images (-1.0 means no republishing) |
+| `rtsp_enabled` | bool | true | true, false | Enable RTSP streaming functionality |
+| `rtsp_port` | int | 8554 | Any valid port number | RTSP server port |
+| `rtsp_address` | string | "0.0.0.0" | Any valid IP address | RTSP server address |
 
 #### Running with Custom Parameters
 
@@ -172,6 +177,78 @@ http://localhost:8080/snapshot?topic=/camera/image_raw
 | `invert` | flag | not present | present/not present | Invert image when parameter is present |
 | `default_transport` | string | "raw" | "raw", "compressed", "theora" | Image transport to use |
 | `qos_profile` | string | "default" | "default", "system_default", "sensor_data", "services_default" | QoS profile for ROS 2 subscribers |
+
+### RTSP Streaming
+
+The web_video_server now supports RTSP streaming for low-latency video streaming. This is particularly useful for applications requiring real-time video feeds.
+
+#### Enable RTSP Streaming
+
+To create an RTSP stream, make an HTTP request to:
+```
+http://localhost:8080/rtsp_stream?topic=/camera/image_raw
+```
+
+This will return a JSON response with the RTSP URL:
+```json
+{"rtsp_url": "rtsp://localhost:8554/camera/image_raw"}
+```
+
+#### RTSP URL Parameters
+
+| Parameter | Type | Default | Possible Values | Description |
+|-----------|------|---------|----------------|-------------|
+| `topic` | string | (required) | Any valid ROS image topic | The ROS image topic to stream |
+| `codec` | string | "h264" | "h264", "libx264" | Video codec to use for encoding |
+
+#### Using RTSP Streams
+
+Once you have the RTSP URL, you can view the stream using:
+
+**VLC Media Player:**
+```bash
+vlc rtsp://localhost:8554/camera/image_raw
+```
+
+**FFmpeg:**
+```bash
+ffplay rtsp://localhost:8554/camera/image_raw
+```
+
+**GStreamer:**
+```bash
+gst-launch-1.0 rtspsrc location=rtsp://localhost:8554/camera/image_raw ! decodebin ! videoconvert ! autovideosink
+```
+
+**OpenCV Python:**
+```python
+import cv2
+
+cap = cv2.VideoCapture('rtsp://localhost:8554/camera/image_raw')
+while True:
+    ret, frame = cap.read()
+    if ret:
+        cv2.imshow('RTSP Stream', frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    else:
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+```
+
+#### RTSP Configuration
+
+You can configure RTSP streaming with additional parameters:
+
+```bash
+# Enable RTSP with custom port
+ros2 run web_video_server web_video_server --ros-args -p rtsp_enabled:=true -p rtsp_port:=8555
+
+# Disable RTSP streaming
+ros2 run web_video_server web_video_server --ros-args -p rtsp_enabled:=false
+```
 
 ## About
 
