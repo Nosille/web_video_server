@@ -227,7 +227,7 @@ void RTSPStreamer::stop()
 
 std::string RTSPStreamer::getStreamUrl() const
 {
-  return "rtsp://localhost:" + std::to_string(rtsp_port_) + "/" + topic_;
+  return "rtsp://localhost:" + std::to_string(rtsp_port_) + "/stream?topic=" + topic_ + "&type=" + codec_name_;
 }
 
 void RTSPStreamer::rtspServerThread()
@@ -270,8 +270,10 @@ void RTSPStreamer::handleRTSPRequest(int client_socket)
     
     RCLCPP_DEBUG(node_->get_logger(), "RTSP %s request for %s", method.c_str(), uri.c_str());
     
-    if (method == "DESCRIBE") {
-      handleDescribe(client_socket, uri);
+    if (method == "OPTIONS") {
+      handleOptions(client_socket, uri, request);
+    } else if (method == "DESCRIBE") {
+      handleDescribe(client_socket, uri, request);
     } else if (method == "SETUP") {
       // Extract transport from request
       std::string transport;
@@ -283,7 +285,7 @@ void RTSPStreamer::handleRTSPRequest(int client_socket)
         transport.erase(0, transport.find_first_not_of(" \t"));
         transport.erase(transport.find_last_not_of(" \t") + 1);
       }
-      handleSetup(client_socket, transport);
+      handleSetup(client_socket, transport, request);
     } else if (method == "PLAY") {
       // Extract session from request
       std::string session;
@@ -295,7 +297,7 @@ void RTSPStreamer::handleRTSPRequest(int client_socket)
         session.erase(0, session.find_first_not_of(" \t"));
         session.erase(session.find_last_not_of(" \t") + 1);
       }
-      handlePlay(client_socket, session);
+      handlePlay(client_socket, session, request);
     } else if (method == "TEARDOWN") {
       // Extract session from request
       std::string session;
@@ -307,7 +309,7 @@ void RTSPStreamer::handleRTSPRequest(int client_socket)
         session.erase(0, session.find_first_not_of(" \t"));
         session.erase(session.find_last_not_of(" \t") + 1);
       }
-      handleTeardown(client_socket, session);
+      handleTeardown(client_socket, session, request);
       break;
     }
   }
@@ -315,12 +317,50 @@ void RTSPStreamer::handleRTSPRequest(int client_socket)
   close(client_socket);
 }
 
-void RTSPStreamer::handleDescribe(int client_socket, const std::string& uri)
+void RTSPStreamer::handleOptions(int client_socket, const std::string& uri, const std::string& request)
 {
+  // Extract CSeq from request
+  std::string cseq = "1"; // Default value
+  size_t cseq_pos = request.find("CSeq:");
+  if (cseq_pos != std::string::npos) {
+    size_t line_end = request.find("\r\n", cseq_pos);
+    if (line_end != std::string::npos) {
+      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
+      // Trim whitespace
+      cseq.erase(0, cseq.find_first_not_of(" \t"));
+      cseq.erase(cseq.find_last_not_of(" \t") + 1);
+    }
+  }
+  
+  std::stringstream response;
+  response << "RTSP/1.0 200 OK\r\n"
+           << "CSeq: " << cseq << "\r\n"
+           << "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n"
+           << "\r\n";
+
+  send(client_socket, response.str().c_str(), response.str().length(), 0);
+}
+
+void RTSPStreamer::handleDescribe(int client_socket, const std::string& uri, const std::string& request)
+{
+  // Extract CSeq from request
+  std::string cseq = "1"; // Default value
+  size_t cseq_pos = request.find("CSeq:");
+  if (cseq_pos != std::string::npos) {
+    size_t line_end = request.find("\r\n", cseq_pos);
+    if (line_end != std::string::npos) {
+      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
+      // Trim whitespace
+      cseq.erase(0, cseq.find_first_not_of(" \t"));
+      cseq.erase(cseq.find_last_not_of(" \t") + 1);
+    }
+  }
+  
   std::string sdp = generateSDPDescription();
   
   std::stringstream response;
   response << "RTSP/1.0 200 OK\r\n"
+           << "CSeq: " << cseq << "\r\n"
            << "Content-Type: application/sdp\r\n"
            << "Content-Length: " << sdp.length() << "\r\n"
            << "\r\n"
@@ -329,8 +369,21 @@ void RTSPStreamer::handleDescribe(int client_socket, const std::string& uri)
   send(client_socket, response.str().c_str(), response.str().length(), 0);
 }
 
-void RTSPStreamer::handleSetup(int client_socket, const std::string& transport)
+void RTSPStreamer::handleSetup(int client_socket, const std::string& transport, const std::string& request)
 {
+  // Extract CSeq from request
+  std::string cseq = "1"; // Default value
+  size_t cseq_pos = request.find("CSeq:");
+  if (cseq_pos != std::string::npos) {
+    size_t line_end = request.find("\r\n", cseq_pos);
+    if (line_end != std::string::npos) {
+      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
+      // Trim whitespace
+      cseq.erase(0, cseq.find_first_not_of(" \t"));
+      cseq.erase(cseq.find_last_not_of(" \t") + 1);
+    }
+  }
+  
   std::string session_id = generateSessionId();
   
   // Parse transport info to get client RTP ports
@@ -369,6 +422,7 @@ void RTSPStreamer::handleSetup(int client_socket, const std::string& transport)
   
   std::stringstream response;
   response << "RTSP/1.0 200 OK\r\n"
+           << "CSeq: " << cseq << "\r\n"
            << "Transport: " << transport << ";server_port=" << rtsp_port_ << "-" << (rtsp_port_ + 1) << "\r\n"
            << "Session: " << session_id << "\r\n"
            << "\r\n";
@@ -376,10 +430,24 @@ void RTSPStreamer::handleSetup(int client_socket, const std::string& transport)
   send(client_socket, response.str().c_str(), response.str().length(), 0);
 }
 
-void RTSPStreamer::handlePlay(int client_socket, const std::string& session)
+void RTSPStreamer::handlePlay(int client_socket, const std::string& session, const std::string& request)
 {
+  // Extract CSeq from request
+  std::string cseq = "1"; // Default value
+  size_t cseq_pos = request.find("CSeq:");
+  if (cseq_pos != std::string::npos) {
+    size_t line_end = request.find("\r\n", cseq_pos);
+    if (line_end != std::string::npos) {
+      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
+      // Trim whitespace
+      cseq.erase(0, cseq.find_first_not_of(" \t"));
+      cseq.erase(cseq.find_last_not_of(" \t") + 1);
+    }
+  }
+  
   std::stringstream response;
   response << "RTSP/1.0 200 OK\r\n"
+           << "CSeq: " << cseq << "\r\n"
            << "Session: " << session << "\r\n"
            << "\r\n";
   
@@ -393,10 +461,24 @@ void RTSPStreamer::handlePlay(int client_socket, const std::string& session)
   }
 }
 
-void RTSPStreamer::handleTeardown(int client_socket, const std::string& session)
+void RTSPStreamer::handleTeardown(int client_socket, const std::string& session, const std::string& request)
 {
+  // Extract CSeq from request
+  std::string cseq = "1"; // Default value
+  size_t cseq_pos = request.find("CSeq:");
+  if (cseq_pos != std::string::npos) {
+    size_t line_end = request.find("\r\n", cseq_pos);
+    if (line_end != std::string::npos) {
+      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
+      // Trim whitespace
+      cseq.erase(0, cseq.find_first_not_of(" \t"));
+      cseq.erase(cseq.find_last_not_of(" \t") + 1);
+    }
+  }
+  
   std::stringstream response;
   response << "RTSP/1.0 200 OK\r\n"
+           << "CSeq: " << cseq << "\r\n"
            << "Session: " << session << "\r\n"
            << "\r\n";
   
@@ -442,6 +524,7 @@ void RTSPStreamer::imageCallback(const sensor_msgs::msg::Image::ConstPtr & msg)
   
   cv_bridge::CvImagePtr cv_ptr;
   try {
+    // First try to convert to BGR8
     cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
   } catch (cv_bridge::Exception& e) {
     RCLCPP_ERROR(node_->get_logger(), "cv_bridge exception: %s", e.what());
@@ -523,37 +606,193 @@ void RTSPStreamer::encodeAndSendFrame(const cv::Mat & frame)
       break;
     }
     
-    // Send RTP packet to all clients
-    {
-      std::lock_guard<std::mutex> lock(clients_mutex_);
-      for (auto& client_pair : clients_) {
-        auto& client = client_pair.second;
-        if (client->active && client->rtp_port > 0) {
-          // Create RTP packet (simplified)
-          // In a real implementation, you'd need proper RTP packetization
-          // For now, we'll just send the raw H.264 data
-          
-          struct sockaddr_in client_addr;
-          client_addr.sin_family = AF_INET;
-          client_addr.sin_port = htons(client->rtp_port);
-          inet_pton(AF_INET, client->client_ip.c_str(), &client_addr.sin_addr);
-          
-          int rtp_socket = socket(AF_INET, SOCK_DGRAM, 0);
-          if (rtp_socket >= 0) {
-            sendto(rtp_socket, packet_->data, packet_->size, 0,
-                   (struct sockaddr*)&client_addr, sizeof(client_addr));
-            close(rtp_socket);
-          }
-        }
-      }
+  // Send H.264 NAL units as RTP packets
+  // First, check if we need to send SPS/PPS before the frame
+  if (packet_->flags & AV_PKT_FLAG_KEY) {
+    // This is a keyframe, send SPS/PPS first if available
+    if (codec_context_->extradata && codec_context_->extradata_size > 0) {
+      sendSPSPPS();
     }
+  }
+  
+  sendH264NALUnit(packet_->data, packet_->size, rtp_timestamp_);
     
-    rtp_timestamp_ += 3000; // Increment timestamp
-    rtp_sequence_++;
+    rtp_timestamp_ += 3000; // Increment timestamp (90kHz clock)
     
     av_packet_unref(packet_);
   }
 }
+
+void RTSPStreamer::sendH264NALUnit(const uint8_t* nal_data, size_t nal_size, uint32_t timestamp) {
+  const size_t max_rtp_payload_size = 1400;  // Typical MTU size minus headers
+
+  if (nal_size <= max_rtp_payload_size) {
+    // Single NAL unit
+    sendRTPPacket(nal_data, nal_size, true, timestamp);
+  } else {
+    // Fragmented NAL unit (FU-A)
+    uint8_t nal_header = nal_data[0];
+    const uint8_t* nal_payload = nal_data + 1;
+    size_t nal_payload_size = nal_size - 1;
+    
+    // FU-A indicator: F=0, NRI from original NAL, Type=28 (FU-A)
+    uint8_t fu_indicator = (nal_header & 0xE0) | NALU_TYPE_FU_A;
+    
+    size_t offset = 0;
+    bool first_fragment = true;
+    
+    while (offset < nal_payload_size) {
+      size_t fragment_size = std::min(max_rtp_payload_size - 2, nal_payload_size - offset);  // -2 for FU headers
+      
+      // FU-A header: S, E, R, Type from original NAL
+      uint8_t fu_header = (nal_header & 0x1F);  // NAL unit type
+      
+      if (first_fragment) {
+        fu_header |= 0x80;  // Start bit
+        first_fragment = false;
+      }
+      
+      if (offset + fragment_size >= nal_payload_size) {
+        fu_header |= 0x40;  // End bit
+      }
+
+      std::vector<uint8_t> rtp_packet;
+      rtp_packet.push_back(fu_indicator);
+      rtp_packet.push_back(fu_header);
+      rtp_packet.insert(rtp_packet.end(), nal_payload + offset, nal_payload + offset + fragment_size);
+
+      sendRTPPacket(rtp_packet.data(), rtp_packet.size(), (offset + fragment_size >= nal_payload_size), timestamp);
+
+      offset += fragment_size;
+    }
+  }
+}
+
+void RTSPStreamer::sendSPSPPS() {
+  if (!codec_context_ || !codec_context_->extradata || codec_context_->extradata_size == 0) {
+    return;
+  }
+  
+  uint8_t* extradata = codec_context_->extradata;
+  int extradata_size = codec_context_->extradata_size;
+  
+  // H.264 extradata format: [configurationVersion][AVCProfileIndication][profile_compatibility][AVCLevelIndication][lengthSizeMinusOne][numOfSequenceParameterSets]...
+  if (extradata_size >= 8 && extradata[0] == 1) {
+    // Parse SPS
+    int sps_count = extradata[5] & 0x1f;
+    int offset = 6;
+    
+    for (int i = 0; i < sps_count && offset < extradata_size - 2; i++) {
+      int sps_length = (extradata[offset] << 8) | extradata[offset + 1];
+      offset += 2;
+      
+      if (offset + sps_length <= extradata_size) {
+        // Send SPS NAL unit with start code
+        std::vector<uint8_t> sps_nal;
+        sps_nal.push_back(0x00);
+        sps_nal.push_back(0x00);
+        sps_nal.push_back(0x00);
+        sps_nal.push_back(0x01);
+        sps_nal.insert(sps_nal.end(), extradata + offset, extradata + offset + sps_length);
+        
+        sendH264NALUnit(sps_nal.data() + 4, sps_nal.size() - 4, rtp_timestamp_);
+        offset += sps_length;
+        break; // Only use first SPS
+      }
+    }
+    
+    // Parse PPS
+    if (offset < extradata_size) {
+      int pps_count = extradata[offset];
+      offset++;
+      
+      for (int i = 0; i < pps_count && offset < extradata_size - 2; i++) {
+        int pps_length = (extradata[offset] << 8) | extradata[offset + 1];
+        offset += 2;
+        
+        if (offset + pps_length <= extradata_size) {
+          // Send PPS NAL unit with start code
+          std::vector<uint8_t> pps_nal;
+          pps_nal.push_back(0x00);
+          pps_nal.push_back(0x00);
+          pps_nal.push_back(0x00);
+          pps_nal.push_back(0x01);
+          pps_nal.insert(pps_nal.end(), extradata + offset, extradata + offset + pps_length);
+          
+          sendH264NALUnit(pps_nal.data() + 4, pps_nal.size() - 4, rtp_timestamp_);
+          break; // Only use first PPS
+        }
+      }
+    }
+  }
+}
+
+
+void RTSPStreamer::sendRTPPacket(const uint8_t* data, size_t size, bool marker, uint32_t timestamp) {
+  RTSPStreamer::RTPHeader header = createRTPHeader(marker, timestamp);
+
+  // Send RTP packet to all clients
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  for (auto& client_pair : clients_) {
+    auto& client = client_pair.second;
+    if (client->active && client->rtp_port > 0) {
+      struct sockaddr_in client_addr;
+      client_addr.sin_family = AF_INET;
+      client_addr.sin_port = htons(client->rtp_port);
+      inet_pton(AF_INET, client->client_ip.c_str(), &client_addr.sin_addr);
+
+      int rtp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+      if (rtp_socket >= 0) {
+        std::vector<uint8_t> packet_data(sizeof(RTSPStreamer::RTPHeader) + size);
+        std::memcpy(packet_data.data(), &header, sizeof(RTSPStreamer::RTPHeader));
+        std::memcpy(packet_data.data() + sizeof(RTSPStreamer::RTPHeader), data, size);
+
+        sendto(rtp_socket, packet_data.data(), packet_data.size(), 0,
+               (struct sockaddr*)&client_addr, sizeof(client_addr));
+        close(rtp_socket);
+      }
+    }
+  }
+}
+
+
+RTSPStreamer::RTPHeader RTSPStreamer::createRTPHeader(bool marker, uint32_t timestamp) {
+  RTPHeader header;
+  header.version_padding_extension_csrc_count = (2 << 6);  // Version 2, no padding, no extension
+  header.marker_payload_type = (marker << 7) | 96;  // Marker bit and payload type 96
+  header.sequence_number = htons(rtp_sequence_++);
+  header.timestamp = htonl(timestamp);
+  header.ssrc = htonl(rtp_ssrc_);
+  return header;
+}
+
+
+std::vector<uint8_t> RTSPStreamer::findNALUnits(const uint8_t* data, size_t size) {
+  std::vector<uint8_t> nal_units;
+  size_t start = 0;
+
+  while (start < size) {
+    // Look for the start code
+    size_t end = start;
+    while (end < size - 4) {
+      if (data[end] == 0x00 && data[end + 1] == 0x00 && data[end + 2] == 0x00 && data[end + 3] == 0x01) {
+        break;
+      }
+      end++;
+    }
+    
+    if (end < size - 4) {
+      nal_units.push_back(end);
+      start = end + 4;
+    } else {
+      nal_units.push_back(size);
+      break;
+    }
+  }
+
+  return nal_units;
+}
+
 
 void RTSPStreamer::initializeEncoder()
 {
@@ -659,6 +898,89 @@ std::string RTSPStreamer::generateSDPDescription()
 {
   std::stringstream sdp;
   
+  // Extract SPS and PPS from codec context if available
+  std::string sps_pps_params;
+  if (codec_context_ && codec_context_->extradata_size > 0) {
+    // Parse extradata to find SPS and PPS
+    uint8_t* extradata = codec_context_->extradata;
+    int extradata_size = codec_context_->extradata_size;
+    
+    // H.264 extradata format: [configurationVersion][AVCProfileIndication][profile_compatibility][AVCLevelIndication][lengthSizeMinusOne][numOfSequenceParameterSets]...
+    if (extradata_size >= 8 && extradata[0] == 1) {
+      // Parse SPS
+      int sps_count = extradata[5] & 0x1f;
+      int offset = 6;
+      
+      for (int i = 0; i < sps_count && offset < extradata_size - 2; i++) {
+        int sps_length = (extradata[offset] << 8) | extradata[offset + 1];
+        offset += 2;
+        
+        if (offset + sps_length <= extradata_size) {
+          // Convert SPS to base64
+          std::string sps_base64;
+          const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+          
+          for (int j = 0; j < sps_length; j += 3) {
+            uint32_t val = 0;
+            for (int k = 0; k < 3 && j + k < sps_length; k++) {
+              val |= (extradata[offset + j + k] << (16 - k * 8));
+            }
+            
+            sps_base64 += chars[(val >> 18) & 0x3f];
+            sps_base64 += chars[(val >> 12) & 0x3f];
+            sps_base64 += (j + 1 < sps_length) ? chars[(val >> 6) & 0x3f] : '=';
+            sps_base64 += (j + 2 < sps_length) ? chars[val & 0x3f] : '=';
+          }
+          
+          if (!sps_pps_params.empty()) sps_pps_params += ",";
+          sps_pps_params += "sprop-parameter-sets=" + sps_base64;
+          offset += sps_length;
+          break; // Only use first SPS
+        }
+      }
+      
+      // Parse PPS
+      if (offset < extradata_size) {
+        int pps_count = extradata[offset];
+        offset++;
+        
+        for (int i = 0; i < pps_count && offset < extradata_size - 2; i++) {
+          int pps_length = (extradata[offset] << 8) | extradata[offset + 1];
+          offset += 2;
+          
+          if (offset + pps_length <= extradata_size) {
+            // Convert PPS to base64
+            std::string pps_base64;
+            const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            
+            for (int j = 0; j < pps_length; j += 3) {
+              uint32_t val = 0;
+              for (int k = 0; k < 3 && j + k < pps_length; k++) {
+                val |= (extradata[offset + j + k] << (16 - k * 8));
+              }
+              
+              pps_base64 += chars[(val >> 18) & 0x3f];
+              pps_base64 += chars[(val >> 12) & 0x3f];
+              pps_base64 += (j + 1 < pps_length) ? chars[(val >> 6) & 0x3f] : '=';
+              pps_base64 += (j + 2 < pps_length) ? chars[val & 0x3f] : '=';
+            }
+            
+            if (!sps_pps_params.empty()) sps_pps_params += ",";
+            else sps_pps_params += "sprop-parameter-sets=";
+            sps_pps_params += pps_base64;
+            break; // Only use first PPS
+          }
+        }
+      }
+    }
+  }
+  
+  // If we couldn't extract SPS/PPS, use default H.264 baseline profile parameters
+  if (sps_pps_params.empty()) {
+    // Default SPS/PPS for H.264 baseline profile (640x480)
+    sps_pps_params = "sprop-parameter-sets=Z0IAH5WoFAFuQA==,aM48gA==";
+  }
+  
   sdp << "v=0\r\n"
       << "o=- 0 0 IN IP4 127.0.0.1\r\n"
       << "s=ROS Video Stream\r\n"
@@ -667,7 +989,7 @@ std::string RTSPStreamer::generateSDPDescription()
       << "a=tool:web_video_server\r\n"
       << "m=video 0 RTP/AVP 96\r\n"
       << "a=rtpmap:96 H264/90000\r\n"
-      << "a=fmtp:96 packetization-mode=1\r\n"
+      << "a=fmtp:96 packetization-mode=1;" << sps_pps_params << "\r\n"
       << "a=control:*\r\n";
   
   return sdp.str();

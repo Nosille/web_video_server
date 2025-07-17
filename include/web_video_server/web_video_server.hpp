@@ -102,8 +102,12 @@ public:
 private:
   void restreamFrames(std::chrono::duration<double> max_age);
   void cleanup_inactive_streams();
+  void initializeHttpServer();
+  void initializeRtspServer();
 
   rclcpp::TimerBase::SharedPtr cleanup_timer_;
+  rclcpp::TimerBase::SharedPtr keepalive_timer_;
+  rclcpp::TimerBase::SharedPtr rtsp_init_timer_;
 
   // Parameters
   int ros_threads_;
@@ -117,6 +121,9 @@ private:
   bool rtsp_enabled_;
   int rtsp_port_;
   std::string rtsp_address_;
+  
+  // HTTP Parameters
+  bool http_enabled_;
 
   std::shared_ptr<async_web_server_cpp::HttpServer> server_;
   async_web_server_cpp::HttpRequestHandlerGroup handler_group_;

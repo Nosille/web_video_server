@@ -68,6 +68,9 @@ WebVideoServer::WebVideoServer(const rclcpp::NodeOptions & options)
   declare_parameter("rtsp_enabled", true);
   declare_parameter("rtsp_port", 8554);
   declare_parameter("rtsp_address", "0.0.0.0");
+  
+  // HTTP parameters
+  declare_parameter("http_enabled", true);
 
   get_parameter("port", port_);
   get_parameter("verbose", verbose_);
@@ -81,7 +84,17 @@ WebVideoServer::WebVideoServer(const rclcpp::NodeOptions & options)
   get_parameter("rtsp_enabled", rtsp_enabled_);
   get_parameter("rtsp_port", rtsp_port_);
   get_parameter("rtsp_address", rtsp_address_);
+  
+  // Get HTTP parameters
+  get_parameter("http_enabled", http_enabled_);
 
+  // Validate configuration
+  if (!http_enabled_ && !rtsp_enabled_) {
+    RCLCPP_ERROR(get_logger(), "Both HTTP and RTSP are disabled. At least one must be enabled.");
+    throw std::runtime_error("Both HTTP and RTSP are disabled");
+  }
+
+  // Initialize stream types (used by both HTTP and RTSP)
   stream_types_["mjpeg"] = std::make_shared<MjpegStreamerType>();
   stream_types_["png"] = std::make_shared<PngStreamerType>();
   stream_types_["ros_compressed"] = std::make_shared<RosCompressedStreamerType>();
@@ -89,57 +102,43 @@ WebVideoServer::WebVideoServer(const rclcpp::NodeOptions & options)
   stream_types_["h264"] = std::make_shared<H264StreamerType>();
   stream_types_["vp9"] = std::make_shared<Vp9StreamerType>();
 
-  handler_group_.addHandlerForPath(
-    "/",
-    boost::bind(&WebVideoServer::handle_list_streams, this, _1, _2, _3, _4));
-  handler_group_.addHandlerForPath(
-    "/stream",
-    boost::bind(&WebVideoServer::handle_stream, this, _1, _2, _3, _4));
-  handler_group_.addHandlerForPath(
-    "/stream_viewer",
-    boost::bind(&WebVideoServer::handle_stream_viewer, this, _1, _2, _3, _4));
-  handler_group_.addHandlerForPath(
-    "/snapshot",
-    boost::bind(&WebVideoServer::handle_snapshot, this, _1, _2, _3, _4));
-  handler_group_.addHandlerForPath(
-    "/rtsp_stream",
-    boost::bind(&WebVideoServer::handle_rtsp_stream, this, _1, _2, _3, _4));
-
-  try {
-    server_.reset(
-      new async_web_server_cpp::HttpServer(
-        address_, std::to_string(port_),
-        boost::bind(&WebVideoServer::handle_request, this, _1, _2, _3, _4),
-        server_threads
-      )
-    );
-  } catch (boost::exception & e) {
-    RCLCPP_ERROR(
-      get_logger(), "Exception when creating the web server! %s:%d",
-      address_.c_str(), port_);
-    throw;
+  // Initialize HTTP server if enabled
+  if (http_enabled_) {
+    initializeHttpServer();
   }
 
-  RCLCPP_INFO(get_logger(), "Waiting For connections on %s:%d", address_.c_str(), port_);
-
+  // Initialize timers
   if (publish_rate_ > 0) {
     create_wall_timer(1s / publish_rate_, [this]() {restreamFrames(1s / publish_rate_);});
   }
 
   cleanup_timer_ = create_wall_timer(500ms, [this]() {cleanup_inactive_streams();});
 
-  // Initialize RTSP manager if enabled
+  // Initialize RTSP server if enabled (deferred to avoid shared_from_this() issue)
   if (rtsp_enabled_) {
-    rtsp_manager_ = std::make_shared<RTSPStreamerManager>(shared_from_this());
-    RCLCPP_INFO(get_logger(), "RTSP streaming enabled on %s:%d", rtsp_address_.c_str(), rtsp_port_);
+    // Use a timer to defer RTSP initialization until after construction
+    rtsp_init_timer_ = create_wall_timer(10ms, [this]() {
+      initializeRtspServer();
+      rtsp_init_timer_->cancel();
+    });
   }
 
-  server_->run();
+  // Start appropriate servers
+  if (http_enabled_) {
+    server_->run();
+  } else {
+    RCLCPP_INFO(get_logger(), "HTTP server disabled. Using RTSP only.");
+    // Keep node alive for RTSP streaming
+    // We'll use a simple timer to keep the node running
+    keepalive_timer_ = create_wall_timer(1s, [this]() {});
+  }
 }
 
 WebVideoServer::~WebVideoServer()
 {
-  server_->stop();
+  if (server_) {
+    server_->stop();
+  }
 }
 
 void WebVideoServer::restreamFrames(std::chrono::duration<double> max_age)
@@ -432,12 +431,25 @@ bool WebVideoServer::handle_rtsp_stream(
   }
 
   std::string topic = request.get_query_param_value_or_default("topic", "");
-  std::string codec = request.get_query_param_value_or_default("codec", "h264");
+  std::string type = request.get_query_param_value_or_default("type", "h264");
   
   if (topic.empty()) {
     async_web_server_cpp::HttpReply::stock_reply(async_web_server_cpp::HttpReply::bad_request)(
       request, connection, nullptr, nullptr);
     return true;
+  }
+
+  // Map HTTP stream types to RTSP codec names
+  std::string codec = "libx264"; // default
+  if (type == "h264") {
+    codec = "libx264";
+  } else if (type == "vp8") {
+    codec = "libvpx";
+  } else if (type == "vp9") {
+    codec = "libvpx-vp9";
+  } else {
+    // For other types like mjpeg, png, etc., use default h264
+    codec = "libx264";
   }
 
   // Create or get existing RTSP streamer
@@ -451,9 +463,9 @@ bool WebVideoServer::handle_rtsp_stream(
   // Start the streamer
   streamer->start();
 
-  // Return JSON response with stream URL
+  // Return JSON response with stream URL that mirrors HTTP pattern
   std::stringstream json_response;
-  json_response << "{\"rtsp_url\":\"" << streamer->getStreamUrl() << "\"}"; 
+  json_response << "{\"rtsp_url\":\"rtsp://localhost:" << rtsp_port_ << "/stream?topic=" << topic << "&type=" << type << "\"}"; 
 
   async_web_server_cpp::HttpReply::builder(async_web_server_cpp::HttpReply::ok)
   .header("Connection", "close")
@@ -464,6 +476,52 @@ bool WebVideoServer::handle_rtsp_stream(
 
   connection->write(json_response.str());
   return true;
+}
+
+void WebVideoServer::initializeHttpServer() {
+  // Setup HTTP request handlers
+  handler_group_.addHandlerForPath(
+    "/",
+    boost::bind(&WebVideoServer::handle_list_streams, this, _1, _2, _3, _4));
+  handler_group_.addHandlerForPath(
+    "/stream",
+    boost::bind(&WebVideoServer::handle_stream, this, _1, _2, _3, _4));
+  handler_group_.addHandlerForPath(
+    "/stream_viewer",
+    boost::bind(&WebVideoServer::handle_stream_viewer, this, _1, _2, _3, _4));
+  handler_group_.addHandlerForPath(
+    "/snapshot",
+    boost::bind(&WebVideoServer::handle_snapshot, this, _1, _2, _3, _4));
+  handler_group_.addHandlerForPath(
+    "/rtsp_stream",
+    boost::bind(&WebVideoServer::handle_rtsp_stream, this, _1, _2, _3, _4));
+
+  // Get server threads parameter
+  int server_threads;
+  get_parameter("server_threads", server_threads);
+
+  try {
+    server_.reset(
+      new async_web_server_cpp::HttpServer(
+        address_, std::to_string(port_),
+        boost::bind(&WebVideoServer::handle_request, this, _1, _2, _3, _4),
+        server_threads
+      )
+    );
+    RCLCPP_INFO(get_logger(), "HTTP server initialized on %s:%d", address_.c_str(), port_);
+  } catch (boost::exception & e) {
+    RCLCPP_ERROR(
+      get_logger(), "Exception when creating the HTTP server! %s:%d",
+      address_.c_str(), port_);
+    throw;
+  }
+}
+
+void WebVideoServer::initializeRtspServer() {
+  if (rtsp_enabled_) {
+    rtsp_manager_ = std::make_shared<RTSPStreamerManager>(shared_from_this());
+    RCLCPP_INFO(get_logger(), "RTSP streaming enabled on %s:%d", rtsp_address_.c_str(), rtsp_port_);
+  }
 }
 
 }  // namespace web_video_server

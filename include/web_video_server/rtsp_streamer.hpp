@@ -50,6 +50,7 @@ extern "C"
 #include <queue>
 #include <map>
 #include <atomic>
+#include <vector>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
@@ -91,10 +92,11 @@ public:
 private:
   void rtspServerThread();
   void handleRTSPRequest(int client_socket);
-  void handleDescribe(int client_socket, const std::string& uri);
-  void handleSetup(int client_socket, const std::string& transport);
-  void handlePlay(int client_socket, const std::string& session);
-  void handleTeardown(int client_socket, const std::string& session);
+  void handleOptions(int client_socket, const std::string& uri, const std::string& request);
+  void handleDescribe(int client_socket, const std::string& uri, const std::string& request);
+  void handleSetup(int client_socket, const std::string& transport, const std::string& request);
+  void handlePlay(int client_socket, const std::string& session, const std::string& request);
+  void handleTeardown(int client_socket, const std::string& session, const std::string& request);
   
   void rtpStreamThread();
   void imageCallback(const sensor_msgs::msg::Image::ConstPtr & msg);
@@ -147,6 +149,45 @@ private:
   uint32_t rtp_timestamp_;
   uint16_t rtp_sequence_;
   uint32_t rtp_ssrc_;
+  
+  // RTP packet structure
+  struct RTPHeader {
+    uint8_t version_padding_extension_csrc_count;
+    uint8_t marker_payload_type;
+    uint16_t sequence_number;
+    uint32_t timestamp;
+    uint32_t ssrc;
+  } __attribute__((packed));
+  
+  // H.264 NAL Unit types
+  enum NALUnitType {
+    NALU_TYPE_UNDEFINED = 0,
+    NALU_TYPE_SLICE = 1,
+    NALU_TYPE_DPA = 2,
+    NALU_TYPE_DPB = 3,
+    NALU_TYPE_DPC = 4,
+    NALU_TYPE_IDR = 5,
+    NALU_TYPE_SEI = 6,
+    NALU_TYPE_SPS = 7,
+    NALU_TYPE_PPS = 8,
+    NALU_TYPE_AUD = 9,
+    NALU_TYPE_EOSEQ = 10,
+    NALU_TYPE_EOSTREAM = 11,
+    NALU_TYPE_FILL = 12,
+    NALU_TYPE_STAP_A = 24,
+    NALU_TYPE_STAP_B = 25,
+    NALU_TYPE_MTAP16 = 26,
+    NALU_TYPE_MTAP24 = 27,
+    NALU_TYPE_FU_A = 28,
+    NALU_TYPE_FU_B = 29
+  };
+  
+  // Helper methods for RTP
+  void sendRTPPacket(const uint8_t* data, size_t size, bool marker, uint32_t timestamp);
+  void sendH264NALUnit(const uint8_t* nal_data, size_t nal_size, uint32_t timestamp);
+  void sendSPSPPS();
+  std::vector<uint8_t> findNALUnits(const uint8_t* data, size_t size);
+  RTPHeader createRTPHeader(bool marker, uint32_t timestamp);
   
   std::chrono::steady_clock::time_point start_time_;
   std::mutex encode_mutex_;
