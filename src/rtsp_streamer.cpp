@@ -606,8 +606,16 @@ void RTSPStreamer::encodeAndSendFrame(const cv::Mat & frame)
       break;
     }
     
-    // Send H.264 NAL units as RTP packets
-    sendH264NALUnit(packet_->data, packet_->size, rtp_timestamp_);
+  // Send H.264 NAL units as RTP packets
+  // First, check if we need to send SPS/PPS before the frame
+  if (packet_->flags & AV_PKT_FLAG_KEY) {
+    // This is a keyframe, send SPS/PPS first if available
+    if (codec_context_->extradata && codec_context_->extradata_size > 0) {
+      sendSPSPPS();
+    }
+  }
+  
+  sendH264NALUnit(packet_->data, packet_->size, rtp_timestamp_);
     
     rtp_timestamp_ += 3000; // Increment timestamp (90kHz clock)
     
@@ -647,6 +655,65 @@ void RTSPStreamer::sendH264NALUnit(const uint8_t* nal_data, size_t nal_size, uin
       sendRTPPacket(rtp_packet.data(), rtp_packet.size(), (offset + fragment_size >= nal_size), timestamp);
 
       offset += fragment_size;
+    }
+  }
+}
+
+void RTSPStreamer::sendSPSPPS() {
+  if (!codec_context_ || !codec_context_->extradata || codec_context_->extradata_size == 0) {
+    return;
+  }
+  
+  uint8_t* extradata = codec_context_->extradata;
+  int extradata_size = codec_context_->extradata_size;
+  
+  // H.264 extradata format: [configurationVersion][AVCProfileIndication][profile_compatibility][AVCLevelIndication][lengthSizeMinusOne][numOfSequenceParameterSets]...
+  if (extradata_size >= 8 && extradata[0] == 1) {
+    // Parse SPS
+    int sps_count = extradata[5] & 0x1f;
+    int offset = 6;
+    
+    for (int i = 0; i < sps_count && offset < extradata_size - 2; i++) {
+      int sps_length = (extradata[offset] << 8) | extradata[offset + 1];
+      offset += 2;
+      
+      if (offset + sps_length <= extradata_size) {
+        // Send SPS NAL unit with start code
+        std::vector<uint8_t> sps_nal;
+        sps_nal.push_back(0x00);
+        sps_nal.push_back(0x00);
+        sps_nal.push_back(0x00);
+        sps_nal.push_back(0x01);
+        sps_nal.insert(sps_nal.end(), extradata + offset, extradata + offset + sps_length);
+        
+        sendH264NALUnit(sps_nal.data() + 4, sps_nal.size() - 4, rtp_timestamp_);
+        offset += sps_length;
+        break; // Only use first SPS
+      }
+    }
+    
+    // Parse PPS
+    if (offset < extradata_size) {
+      int pps_count = extradata[offset];
+      offset++;
+      
+      for (int i = 0; i < pps_count && offset < extradata_size - 2; i++) {
+        int pps_length = (extradata[offset] << 8) | extradata[offset + 1];
+        offset += 2;
+        
+        if (offset + pps_length <= extradata_size) {
+          // Send PPS NAL unit with start code
+          std::vector<uint8_t> pps_nal;
+          pps_nal.push_back(0x00);
+          pps_nal.push_back(0x00);
+          pps_nal.push_back(0x00);
+          pps_nal.push_back(0x01);
+          pps_nal.insert(pps_nal.end(), extradata + offset, extradata + offset + pps_length);
+          
+          sendH264NALUnit(pps_nal.data() + 4, pps_nal.size() - 4, rtp_timestamp_);
+          break; // Only use first PPS
+        }
+      }
     }
   }
 }
@@ -822,6 +889,89 @@ std::string RTSPStreamer::generateSDPDescription()
 {
   std::stringstream sdp;
   
+  // Extract SPS and PPS from codec context if available
+  std::string sps_pps_params;
+  if (codec_context_ && codec_context_->extradata_size > 0) {
+    // Parse extradata to find SPS and PPS
+    uint8_t* extradata = codec_context_->extradata;
+    int extradata_size = codec_context_->extradata_size;
+    
+    // H.264 extradata format: [configurationVersion][AVCProfileIndication][profile_compatibility][AVCLevelIndication][lengthSizeMinusOne][numOfSequenceParameterSets]...
+    if (extradata_size >= 8 && extradata[0] == 1) {
+      // Parse SPS
+      int sps_count = extradata[5] & 0x1f;
+      int offset = 6;
+      
+      for (int i = 0; i < sps_count && offset < extradata_size - 2; i++) {
+        int sps_length = (extradata[offset] << 8) | extradata[offset + 1];
+        offset += 2;
+        
+        if (offset + sps_length <= extradata_size) {
+          // Convert SPS to base64
+          std::string sps_base64;
+          const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+          
+          for (int j = 0; j < sps_length; j += 3) {
+            uint32_t val = 0;
+            for (int k = 0; k < 3 && j + k < sps_length; k++) {
+              val |= (extradata[offset + j + k] << (16 - k * 8));
+            }
+            
+            sps_base64 += chars[(val >> 18) & 0x3f];
+            sps_base64 += chars[(val >> 12) & 0x3f];
+            sps_base64 += (j + 1 < sps_length) ? chars[(val >> 6) & 0x3f] : '=';
+            sps_base64 += (j + 2 < sps_length) ? chars[val & 0x3f] : '=';
+          }
+          
+          if (!sps_pps_params.empty()) sps_pps_params += ",";
+          sps_pps_params += "sprop-parameter-sets=" + sps_base64;
+          offset += sps_length;
+          break; // Only use first SPS
+        }
+      }
+      
+      // Parse PPS
+      if (offset < extradata_size) {
+        int pps_count = extradata[offset];
+        offset++;
+        
+        for (int i = 0; i < pps_count && offset < extradata_size - 2; i++) {
+          int pps_length = (extradata[offset] << 8) | extradata[offset + 1];
+          offset += 2;
+          
+          if (offset + pps_length <= extradata_size) {
+            // Convert PPS to base64
+            std::string pps_base64;
+            const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            
+            for (int j = 0; j < pps_length; j += 3) {
+              uint32_t val = 0;
+              for (int k = 0; k < 3 && j + k < pps_length; k++) {
+                val |= (extradata[offset + j + k] << (16 - k * 8));
+              }
+              
+              pps_base64 += chars[(val >> 18) & 0x3f];
+              pps_base64 += chars[(val >> 12) & 0x3f];
+              pps_base64 += (j + 1 < pps_length) ? chars[(val >> 6) & 0x3f] : '=';
+              pps_base64 += (j + 2 < pps_length) ? chars[val & 0x3f] : '=';
+            }
+            
+            if (!sps_pps_params.empty()) sps_pps_params += ",";
+            else sps_pps_params += "sprop-parameter-sets=";
+            sps_pps_params += pps_base64;
+            break; // Only use first PPS
+          }
+        }
+      }
+    }
+  }
+  
+  // If we couldn't extract SPS/PPS, use default H.264 baseline profile parameters
+  if (sps_pps_params.empty()) {
+    // Default SPS/PPS for H.264 baseline profile (640x480)
+    sps_pps_params = "sprop-parameter-sets=Z0IAH5WoFAFuQA==,aM48gA==";
+  }
+  
   sdp << "v=0\r\n"
       << "o=- 0 0 IN IP4 127.0.0.1\r\n"
       << "s=ROS Video Stream\r\n"
@@ -830,7 +980,7 @@ std::string RTSPStreamer::generateSDPDescription()
       << "a=tool:web_video_server\r\n"
       << "m=video 0 RTP/AVP 96\r\n"
       << "a=rtpmap:96 H264/90000\r\n"
-      << "a=fmtp:96 packetization-mode=1\r\n"
+      << "a=fmtp:96 packetization-mode=1;" << sps_pps_params << "\r\n"
       << "a=control:*\r\n";
   
   return sdp.str();

@@ -185,6 +185,7 @@ private:
   // Helper methods for RTP
   void sendRTPPacket(const uint8_t* data, size_t size, bool marker, uint32_t timestamp);
   void sendH264NALUnit(const uint8_t* nal_data, size_t nal_size, uint32_t timestamp);
+  void sendSPSPPS();
   std::vector<uint8_t> findNALUnits(const uint8_t* data, size_t size);
   RTPHeader createRTPHeader(bool marker, uint32_t timestamp);
   
