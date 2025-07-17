@@ -69,12 +69,36 @@ source install/setup.bash
 
 ### Starting the Server
 
+#### Basic Launch (HTTP + RTSP enabled)
+
 ```bash
 # ROS 1
 rosrun web_video_server web_video_server
 
-# ROS 2
+# ROS 2 - Basic launch with both HTTP and RTSP enabled
+ros2 run web_video_server web_video_server --ros-args -p rtsp_server_enabled:=true -p http_server_enabled:=true
+```
+
+#### Launch Options
+
+**HTTP Only (default behavior):**
+```bash
 ros2 run web_video_server web_video_server
+```
+
+**RTSP Only:**
+```bash
+ros2 run web_video_server web_video_server --ros-args -p rtsp_server_enabled:=true -p http_server_enabled:=false
+```
+
+**Both HTTP + RTSP (recommended for testing):**
+```bash
+ros2 run web_video_server web_video_server --ros-args -p rtsp_server_enabled:=true -p http_server_enabled:=true
+```
+
+**With custom ports:**
+```bash
+ros2 run web_video_server web_video_server --ros-args -p rtsp_server_enabled:=true -p http_server_enabled:=true -p port:=8080 -p rtsp_port:=8554
 ```
 
 
@@ -206,26 +230,34 @@ This will return a JSON response with the RTSP URL:
 
 Once you have the RTSP URL, you can view the stream using:
 
+**GStreamer (Recommended):**
+```bash
+# Full pipeline with RTP depayloading
+gst-launch-1.0 rtspsrc location=rtsp://localhost:8554/stream?topic=/image_raw\&type=h264 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink
+
+# Simple pipeline
+gst-launch-1.0 rtspsrc location=rtsp://localhost:8554/stream?topic=/image_raw\&type=h264 ! decodebin ! videoconvert ! autovideosink
+```
+
+**FFplay:**
+```bash
+# Basic playback
+ffplay rtsp://localhost:8554/stream?topic=/image_raw\&type=h264
+
+# With TCP transport (more reliable)
+ffplay -rtsp_transport tcp rtsp://localhost:8554/stream?topic=/image_raw\&type=h264
+```
+
 **VLC Media Player:**
 ```bash
-vlc rtsp://localhost:8554/camera/image_raw
-```
-
-**FFmpeg:**
-```bash
-ffplay rtsp://localhost:8554/camera/image_raw
-```
-
-**GStreamer:**
-```bash
-gst-launch-1.0 rtspsrc location=rtsp://localhost:8554/camera/image_raw ! decodebin ! videoconvert ! autovideosink
+vlc rtsp://localhost:8554/stream?topic=/image_raw\&type=h264
 ```
 
 **OpenCV Python:**
 ```python
 import cv2
 
-cap = cv2.VideoCapture('rtsp://localhost:8554/camera/image_raw')
+cap = cv2.VideoCapture('rtsp://localhost:8554/stream?topic=/image_raw&type=h264')
 while True:
     ret, frame = cap.read()
     if ret:
