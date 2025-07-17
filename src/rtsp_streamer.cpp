@@ -270,8 +270,10 @@ void RTSPStreamer::handleRTSPRequest(int client_socket)
     
     RCLCPP_DEBUG(node_->get_logger(), "RTSP %s request for %s", method.c_str(), uri.c_str());
     
-    if (method == "DESCRIBE") {
-      handleDescribe(client_socket, uri);
+    if (method == "OPTIONS") {
+      handleOptions(client_socket, uri, request);
+    } else if (method == "DESCRIBE") {
+      handleDescribe(client_socket, uri, request);
     } else if (method == "SETUP") {
       // Extract transport from request
       std::string transport;
@@ -283,7 +285,7 @@ void RTSPStreamer::handleRTSPRequest(int client_socket)
         transport.erase(0, transport.find_first_not_of(" \t"));
         transport.erase(transport.find_last_not_of(" \t") + 1);
       }
-      handleSetup(client_socket, transport);
+      handleSetup(client_socket, transport, request);
     } else if (method == "PLAY") {
       // Extract session from request
       std::string session;
@@ -295,7 +297,7 @@ void RTSPStreamer::handleRTSPRequest(int client_socket)
         session.erase(0, session.find_first_not_of(" \t"));
         session.erase(session.find_last_not_of(" \t") + 1);
       }
-      handlePlay(client_socket, session);
+      handlePlay(client_socket, session, request);
     } else if (method == "TEARDOWN") {
       // Extract session from request
       std::string session;
@@ -307,7 +309,7 @@ void RTSPStreamer::handleRTSPRequest(int client_socket)
         session.erase(0, session.find_first_not_of(" \t"));
         session.erase(session.find_last_not_of(" \t") + 1);
       }
-      handleTeardown(client_socket, session);
+      handleTeardown(client_socket, session, request);
       break;
     }
   }
@@ -315,12 +317,50 @@ void RTSPStreamer::handleRTSPRequest(int client_socket)
   close(client_socket);
 }
 
-void RTSPStreamer::handleDescribe(int client_socket, const std::string& uri)
+void RTSPStreamer::handleOptions(int client_socket, const std::string& uri, const std::string& request)
 {
+  // Extract CSeq from request
+  std::string cseq = "1"; // Default value
+  size_t cseq_pos = request.find("CSeq:");
+  if (cseq_pos != std::string::npos) {
+    size_t line_end = request.find("\r\n", cseq_pos);
+    if (line_end != std::string::npos) {
+      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
+      // Trim whitespace
+      cseq.erase(0, cseq.find_first_not_of(" \t"));
+      cseq.erase(cseq.find_last_not_of(" \t") + 1);
+    }
+  }
+  
+  std::stringstream response;
+  response << "RTSP/1.0 200 OK\r\n"
+           << "CSeq: " << cseq << "\r\n"
+           << "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n"
+           << "\r\n";
+
+  send(client_socket, response.str().c_str(), response.str().length(), 0);
+}
+
+void RTSPStreamer::handleDescribe(int client_socket, const std::string& uri, const std::string& request)
+{
+  // Extract CSeq from request
+  std::string cseq = "1"; // Default value
+  size_t cseq_pos = request.find("CSeq:");
+  if (cseq_pos != std::string::npos) {
+    size_t line_end = request.find("\r\n", cseq_pos);
+    if (line_end != std::string::npos) {
+      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
+      // Trim whitespace
+      cseq.erase(0, cseq.find_first_not_of(" \t"));
+      cseq.erase(cseq.find_last_not_of(" \t") + 1);
+    }
+  }
+  
   std::string sdp = generateSDPDescription();
   
   std::stringstream response;
   response << "RTSP/1.0 200 OK\r\n"
+           << "CSeq: " << cseq << "\r\n"
            << "Content-Type: application/sdp\r\n"
            << "Content-Length: " << sdp.length() << "\r\n"
            << "\r\n"
@@ -329,8 +369,21 @@ void RTSPStreamer::handleDescribe(int client_socket, const std::string& uri)
   send(client_socket, response.str().c_str(), response.str().length(), 0);
 }
 
-void RTSPStreamer::handleSetup(int client_socket, const std::string& transport)
+void RTSPStreamer::handleSetup(int client_socket, const std::string& transport, const std::string& request)
 {
+  // Extract CSeq from request
+  std::string cseq = "1"; // Default value
+  size_t cseq_pos = request.find("CSeq:");
+  if (cseq_pos != std::string::npos) {
+    size_t line_end = request.find("\r\n", cseq_pos);
+    if (line_end != std::string::npos) {
+      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
+      // Trim whitespace
+      cseq.erase(0, cseq.find_first_not_of(" \t"));
+      cseq.erase(cseq.find_last_not_of(" \t") + 1);
+    }
+  }
+  
   std::string session_id = generateSessionId();
   
   // Parse transport info to get client RTP ports
@@ -369,6 +422,7 @@ void RTSPStreamer::handleSetup(int client_socket, const std::string& transport)
   
   std::stringstream response;
   response << "RTSP/1.0 200 OK\r\n"
+           << "CSeq: " << cseq << "\r\n"
            << "Transport: " << transport << ";server_port=" << rtsp_port_ << "-" << (rtsp_port_ + 1) << "\r\n"
            << "Session: " << session_id << "\r\n"
            << "\r\n";
@@ -376,10 +430,24 @@ void RTSPStreamer::handleSetup(int client_socket, const std::string& transport)
   send(client_socket, response.str().c_str(), response.str().length(), 0);
 }
 
-void RTSPStreamer::handlePlay(int client_socket, const std::string& session)
+void RTSPStreamer::handlePlay(int client_socket, const std::string& session, const std::string& request)
 {
+  // Extract CSeq from request
+  std::string cseq = "1"; // Default value
+  size_t cseq_pos = request.find("CSeq:");
+  if (cseq_pos != std::string::npos) {
+    size_t line_end = request.find("\r\n", cseq_pos);
+    if (line_end != std::string::npos) {
+      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
+      // Trim whitespace
+      cseq.erase(0, cseq.find_first_not_of(" \t"));
+      cseq.erase(cseq.find_last_not_of(" \t") + 1);
+    }
+  }
+  
   std::stringstream response;
   response << "RTSP/1.0 200 OK\r\n"
+           << "CSeq: " << cseq << "\r\n"
            << "Session: " << session << "\r\n"
            << "\r\n";
   
@@ -393,10 +461,24 @@ void RTSPStreamer::handlePlay(int client_socket, const std::string& session)
   }
 }
 
-void RTSPStreamer::handleTeardown(int client_socket, const std::string& session)
+void RTSPStreamer::handleTeardown(int client_socket, const std::string& session, const std::string& request)
 {
+  // Extract CSeq from request
+  std::string cseq = "1"; // Default value
+  size_t cseq_pos = request.find("CSeq:");
+  if (cseq_pos != std::string::npos) {
+    size_t line_end = request.find("\r\n", cseq_pos);
+    if (line_end != std::string::npos) {
+      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
+      // Trim whitespace
+      cseq.erase(0, cseq.find_first_not_of(" \t"));
+      cseq.erase(cseq.find_last_not_of(" \t") + 1);
+    }
+  }
+  
   std::stringstream response;
   response << "RTSP/1.0 200 OK\r\n"
+           << "CSeq: " << cseq << "\r\n"
            << "Session: " << session << "\r\n"
            << "\r\n";
   

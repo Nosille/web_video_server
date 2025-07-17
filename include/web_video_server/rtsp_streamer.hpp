@@ -91,10 +91,11 @@ public:
 private:
   void rtspServerThread();
   void handleRTSPRequest(int client_socket);
-  void handleDescribe(int client_socket, const std::string& uri);
-  void handleSetup(int client_socket, const std::string& transport);
-  void handlePlay(int client_socket, const std::string& session);
-  void handleTeardown(int client_socket, const std::string& session);
+  void handleOptions(int client_socket, const std::string& uri, const std::string& request);
+  void handleDescribe(int client_socket, const std::string& uri, const std::string& request);
+  void handleSetup(int client_socket, const std::string& transport, const std::string& request);
+  void handlePlay(int client_socket, const std::string& session, const std::string& request);
+  void handleTeardown(int client_socket, const std::string& session, const std::string& request);
   
   void rtpStreamThread();
   void imageCallback(const sensor_msgs::msg::Image::ConstPtr & msg);
