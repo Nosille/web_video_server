@@ -815,68 +815,48 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
               userImage.encoding == sensor_msgs::image_encodings::TYPE_16SC1 ||
               userImage.encoding == sensor_msgs::image_encodings::TYPE_32FC1 ||
               userImage.encoding == sensor_msgs::image_encodings::TYPE_64FC1) {
-      // Convert single-channel user image to BGR format with color gradient background
-      cv_bridge::CvImage userImageBGR;
-      userImageBGR.header = output_cloud.header;
-      userImageBGR.header.frame_id = frame_id_;
-      userImageBGR.encoding = sensor_msgs::image_encodings::BGR8;
-      userImageBGR.image = cv::Mat::zeros(height_, width_, CV_8UC3);
+      // Create type-appropriate gradient directly in the original image format
+      // This preserves the data range and avoids type conversion issues
       
       for (int row = 0; row < height_; row++) {
         for (int col = 0; col < width_; col++) {
-          if (depthMask.at<uint8_t>(row, col) == 255) {
-            // Pixel has real data - convert to grayscale display
-            uint8_t display_value = 128; // Default gray value
+          if (depthMask.at<uint8_t>(row, col) == 0) {
+            // Pixel has no data - fill with type-appropriate gradient value
+            float saturation_ratio = 1.0f - (float)row / (float)height_; // 1.0 at top, 0.0 at bottom
             
-            // Just use the raw data directly like the original code
             if (userImage.encoding == sensor_msgs::image_encodings::TYPE_8UC1) {
-              uint8_t raw_value = userImage.image.at<uint8_t>(row, col);
-              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
-              pixel[0] = raw_value; // B
-              pixel[1] = raw_value; // G  
-              pixel[2] = raw_value; // R (grayscale)
+              // For 8-bit unsigned: gradient from 200 at top to 0 at bottom
+              uint8_t gradient_value = (uint8_t)(200 * saturation_ratio);
+              userImage.image.at<uint8_t>(row, col) = gradient_value;
             } else if (userImage.encoding == sensor_msgs::image_encodings::TYPE_8SC1) {
-              int8_t raw_value = userImage.image.at<int8_t>(row, col);
-              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
-              pixel[0] = raw_value; // B
-              pixel[1] = raw_value; // G  
-              pixel[2] = raw_value; // R (grayscale)
+              // For 8-bit signed: gradient from 100 at top to -100 at bottom
+              int8_t gradient_value = (int8_t)(100 * (2.0f * saturation_ratio - 1.0f));
+              userImage.image.at<int8_t>(row, col) = gradient_value;
             } else if (userImage.encoding == sensor_msgs::image_encodings::TYPE_16UC1) {
-              uint16_t raw_value = userImage.image.at<uint16_t>(row, col);
-              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
-              pixel[0] = raw_value; // B
-              pixel[1] = raw_value; // G  
-              pixel[2] = raw_value; // R (grayscale)
+              // For 16-bit unsigned: gradient from 51400 at top to 0 at bottom
+              uint16_t gradient_value = (uint16_t)(51400 * saturation_ratio);
+              userImage.image.at<uint16_t>(row, col) = gradient_value;
             } else if (userImage.encoding == sensor_msgs::image_encodings::TYPE_16SC1) {
-              int16_t raw_value = userImage.image.at<int16_t>(row, col);
-              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
-              pixel[0] = raw_value; // B
-              pixel[1] = raw_value; // G  
-              pixel[2] = raw_value; // R (grayscale)
+              // For 16-bit signed: gradient from 25700 at top to -25700 at bottom  
+              int16_t gradient_value = (int16_t)(25700 * (2.0f * saturation_ratio - 1.0f));
+              userImage.image.at<int16_t>(row, col) = gradient_value;
             } else if (userImage.encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
-              float raw_value = userImage.image.at<float>(row, col);
-              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
-              pixel[0] = raw_value; // B
-              pixel[1] = raw_value; // G  
-              pixel[2] = raw_value; // R (grayscale)
+              // For 32-bit float: gradient from 1.0 at top to 0.0 at bottom
+              float gradient_value = saturation_ratio;
+              userImage.image.at<float>(row, col) = gradient_value;
             } else if (userImage.encoding == sensor_msgs::image_encodings::TYPE_64FC1) {
-              double raw_value = userImage.image.at<double>(row, col);
-              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
-              pixel[0] = raw_value; // B
-              pixel[1] = raw_value; // G  
-              pixel[2] = raw_value; // R (grayscale)
+              // For 64-bit double: gradient from 1.0 at top to 0.0 at bottom
+              double gradient_value = (double)saturation_ratio;
+              userImage.image.at<double>(row, col) = gradient_value;
             }
-          } else {
-            // Pixel has no data - use color gradient background
-            cv::Vec3b background_pixel = gradientBackground.at<cv::Vec3b>(row, col);
-            userImageBGR.image.at<cv::Vec3b>(row, col) = background_pixel;
           }
+          // Pixels with real data (depthMask == 255) are left unchanged
         }
       }
       
-      // Use the BGR user image for output
+      // Use the original user image (now with gradient background) for output
       sensor_msgs::msg::Image output_msg;
-      userImageBGR.toImageMsg(output_msg);
+      userImage.toImageMsg(output_msg);
       sensor_msgs::msg::Image::ConstPtr output_ptr = std::make_shared<sensor_msgs::msg::Image>(output_msg);
       callback_(output_ptr);
       return;
