@@ -1,5 +1,8 @@
 #include <math.h>
+#include <cmath>
 #include "web_video_server/subscribers/pointcloud2_subscriber.hpp"
+#include <algorithm>
+#include <std_msgs/msg/header.hpp>
 
 #ifdef CV_BRIDGE_USES_OLD_HEADERS
 #include <cv_bridge/cv_bridge.h>
@@ -101,16 +104,16 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
     return;
   }
 
-  //Sort input cloud fields by field offset
+  //Sort input cloud fields by field offset - IMPORTANT: Use input_msg fields, not output_cloud
    RCLCPP_DEBUG_STREAM(node_->get_logger(),"  Sort Fields");
   std::vector<sensor_msgs::msg::PointField> sortedFields(input_msg->fields);
   std::sort(sortedFields.begin(), sortedFields.end(), compareFieldsOffset);
 
-  // Find fields we need in the cloud]
+  // Find fields we need in the cloud
   bool xFound = false, yFound = false, zFound = false;
   bool userFound = false;
   sensor_msgs::msg::PointField xField, yField, zField, userField;
-  for (int i=0; i < sortedFields.size(); i++)
+  for (size_t i = 0; i < sortedFields.size(); i++)
   {
     sensor_msgs::msg::PointField currentField = sortedFields[i];
     
@@ -118,25 +121,25 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
     {
       xFound = true;
       xField = currentField;
-       RCLCPP_DEBUG_STREAM(node_->get_logger(),"   Found X Field");
+      RCLCPP_DEBUG_STREAM(node_->get_logger(),"   Found X Field (datatype: " << currentField.datatype << ")");
     }
     else if(currentField.name == "y")
     {
       yFound = true;
       yField = currentField;
-       RCLCPP_DEBUG_STREAM(node_->get_logger(),"   Found Y Field");            
+      RCLCPP_DEBUG_STREAM(node_->get_logger(),"   Found Y Field (datatype: " << currentField.datatype << ")");          
     }
     else if(currentField.name == "z")
     {
       zFound = true;
       zField = currentField;
-       RCLCPP_DEBUG_STREAM(node_->get_logger(),"   Found Z Field");            
+      RCLCPP_DEBUG_STREAM(node_->get_logger(),"   Found Z Field (datatype: " << currentField.datatype << ")");          
     }
     if(currentField.name == field_)
     {
       userFound = true;
       userField = currentField;
-       RCLCPP_DEBUG_STREAM(node_->get_logger(),"   Found " << currentField.name);             
+      RCLCPP_DEBUG_STREAM(node_->get_logger(),"   Found " << currentField.name << " (datatype: " << currentField.datatype << ")");         
     }
   }
 
@@ -210,13 +213,47 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
   // colorImage.encoding = sensor_msgs::image_encodings::BGR8;
   // colorImage.image = cv::Mat::zeros(height_, width_, 'bgr8');
 
-  // Setup depth image
-   RCLCPP_DEBUG_STREAM(node_->get_logger(),"    Depth");           
+   // Setup depth rendering with mask-based approach
+  RCLCPP_DEBUG_STREAM(node_->get_logger(),"    Depth");           
+  
+  // MASK-BASED DEPTH RENDERING APPROACH:
+  // 1. Create a pure depth buffer (no background) for z-buffering
+  // 2. Create a mask to track which pixels have real depth data
+  // 3. Render depth data using proper z-buffering
+  // 4. Composite final image by blending depth buffer with gradient background
+  
+  // Step 1: Create depth buffer initialized to infinity (no background values)
+  cv::Mat depthBuffer = cv::Mat::ones(height_, width_, CV_32FC1) * std::numeric_limits<float>::max();
+  
+  // Step 2: Create mask to track pixels with real depth data (false = no data, true = has data)
+  cv::Mat depthMask = cv::Mat::zeros(height_, width_, CV_8UC1);
+  
+  // Step 3: Create gradient background image (BGR format for depth visualization)
+  cv::Mat gradientBackground = cv::Mat::zeros(height_, width_, CV_8UC3);
+  for (int row = 0; row < height_; row++) {
+    for (int col = 0; col < width_; col++) {
+      // Create vertical saturation-based gradient from saturated medium blue at top to black at bottom
+      // Medium blue color: RGB(0, 80, 200) -> BGR(200, 80, 0)
+      float saturation_ratio = 1.0f - (float)row / (float)height_; // 1.0 at top (full saturation), 0.0 at bottom (black)
+      uint8_t blue_value = (uint8_t)(200 * saturation_ratio);   // Blue channel (200->0)
+      uint8_t green_value = (uint8_t)(80 * saturation_ratio);   // Green channel (80->0)
+      uint8_t red_value = (uint8_t)(0 * saturation_ratio);      // Red channel (0->0)
+      
+      cv::Vec3b& pixel = gradientBackground.at<cv::Vec3b>(row, col);
+      pixel[0] = blue_value;  // B
+      pixel[1] = green_value; // G
+      pixel[2] = red_value;   // R
+    }
+  }
+  
+  // Step 4: Create final depth image as BGR for color visualization      
   cv_bridge::CvImage depthImage;
   depthImage.header = output_cloud.header;
   depthImage.header.frame_id = frame_id_;
-  depthImage.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
-  depthImage.image = cv::Mat::zeros(height_, width_, CV_32FC1);
+  // depthImage.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
+  // depthImage.image = cv::Mat::zeros(height_, width_, CV_32FC1);
+  depthImage.encoding = sensor_msgs::image_encodings::BGR8;
+  depthImage.image = cv::Mat::zeros(height_, width_, CV_8UC3);
 
   // Setup user image
    RCLCPP_DEBUG_STREAM(node_->get_logger(),"    User");         
@@ -232,6 +269,21 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
      RCLCPP_DEBUG_STREAM(node_->get_logger(),"      4 8-bit unsigned integers");       
     userImage.encoding = sensor_msgs::image_encodings::TYPE_8UC3;
     userImage.image = cv::Mat::zeros(height_, width_, CV_8UC3);
+    // Create dark blue saturation-based gradient background for 3-channel image
+    for (int row = 0; row < height_; row++) {
+      for (int col = 0; col < width_; col++) {
+        // BGR format: create vertical saturation-based gradient from medium blue at top to black at bottom
+        // Medium blue color: RGB(0, 80, 200) -> BGR(200, 80, 0)
+        float saturation_ratio = 1.0f - (float)row / (float)height_; // 1.0 at top (full saturation), 0.0 at bottom (black)
+        uint8_t blue_value = (uint8_t)(200 * saturation_ratio);   // Blue channel (200->0)
+        uint8_t green_value = (uint8_t)(80 * saturation_ratio);   // Green channel (80->0)
+        uint8_t red_value = (uint8_t)(0 * saturation_ratio);      // Red channel (0->0)
+        cv::Vec3b& pixel = userImage.image.at<cv::Vec3b>(row, col);
+        pixel[0] = blue_value;  // B
+        pixel[1] = green_value; // G
+        pixel[2] = red_value;   // R
+      }
+    }
   }
   else if((userField.datatype == sensor_msgs::msg::PointField::UINT16  && userField.count == 4) ||
           (userField.datatype == sensor_msgs::msg::PointField::FLOAT64 && (userField.name == "rgb" || userField.name == "rgba"))
@@ -240,45 +292,67 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
      RCLCPP_DEBUG_STREAM(node_->get_logger(),"      4 16-bit unsigned integers");    
     userImage.encoding = sensor_msgs::image_encodings::TYPE_16UC3;
     userImage.image = cv::Mat::zeros(height_, width_, CV_16UC3);
+    // Create dark blue saturation-based gradient background for 16-bit 3-channel image
+    for (int row = 0; row < height_; row++) {
+      for (int col = 0; col < width_; col++) {
+        // BGR format: create vertical saturation-based gradient from medium blue at top to black at bottom
+        // Medium blue color scaled to 16-bit: RGB(0, 80, 200) -> BGR(51400, 20560, 0)
+        float saturation_ratio = 1.0f - (float)row / (float)height_; // 1.0 at top (full saturation), 0.0 at bottom (black)
+        uint16_t blue_value = (uint16_t)(51400 * saturation_ratio);   // Blue channel (51400->0)
+        uint16_t green_value = (uint16_t)(20560 * saturation_ratio);  // Green channel (20560->0)
+        uint16_t red_value = (uint16_t)(0 * saturation_ratio);        // Red channel (0->0)
+        cv::Vec3w& pixel = userImage.image.at<cv::Vec3w>(row, col);
+        pixel[0] = blue_value;  // B
+        pixel[1] = green_value; // G
+        pixel[2] = red_value;   // R
+      }
+    }
   }
   else if((userField.datatype == sensor_msgs::msg::PointField::UINT8))
   {
      RCLCPP_DEBUG_STREAM(node_->get_logger(),"      1 8-bit unsigned integer");    
     userImage.encoding = sensor_msgs::image_encodings::TYPE_8UC1;
-    userImage.image = cv::Mat::zeros(height_, width_, CV_8UC1);          
+    userImage.image = cv::Mat::zeros(height_, width_, CV_8UC1); 
+    // Initialize with zeros - gradient background will be applied during compositing     
   }
   else if((userField.datatype == sensor_msgs::msg::PointField::INT8))
   {
      RCLCPP_DEBUG_STREAM(node_->get_logger(),"      1 8-bit signed integer");             
     userImage.encoding = sensor_msgs::image_encodings::TYPE_8SC1;
-    userImage.image = cv::Mat::zeros(height_, width_, CV_8SC1);            
+    userImage.image = cv::Mat::zeros(height_, width_, CV_8SC1); 
+    // Initialize with zeros - gradient background will be applied during compositing           
   }        
   else if((userField.datatype == sensor_msgs::msg::PointField::UINT16))
   {
      RCLCPP_DEBUG_STREAM(node_->get_logger(),"      1 16-bit unsigned integer");               
     userImage.encoding = sensor_msgs::image_encodings::TYPE_16UC1;
-    userImage.image = cv::Mat::zeros(height_, width_, CV_16UC1);            
+    userImage.image = cv::Mat::zeros(height_, width_, CV_16UC1);    
+    // Initialize with zeros - gradient background will be applied during compositing        
   }
   else if((userField.datatype == sensor_msgs::msg::PointField::INT16))
   {
      RCLCPP_DEBUG_STREAM(node_->get_logger(),"      1 16-bit signed integer");               
     userImage.encoding = sensor_msgs::image_encodings::TYPE_16SC1;
     userImage.image = cv::Mat::zeros(height_, width_, CV_16SC1);  
+    // Initialize with zeros - gradient background will be applied during compositing
   }
   else if((userField.datatype == sensor_msgs::msg::PointField::FLOAT32))
   {
      RCLCPP_DEBUG_STREAM(node_->get_logger(),"      1 32-bit float");     
     userImage.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
-    userImage.image = cv::Mat::zeros(height_, width_, CV_32FC1);            
+    userImage.image = cv::Mat::zeros(height_, width_, CV_32FC1);   
+    // Initialize with zeros - gradient background will be applied during compositing         
   }        
   else if((userField.datatype == sensor_msgs::msg::PointField::FLOAT64))
   {
      RCLCPP_DEBUG_STREAM(node_->get_logger(),"      1 64-bit float");               
     userImage.encoding = sensor_msgs::image_encodings::TYPE_64FC1;
     userImage.image = cv::Mat::zeros(height_, width_, CV_64FC1);  
+    // Initialize with zeros - gradient background will be applied during compositing
   }        
-  else if(field_ != "depth")
+  else if(field_ != "depth" && !userFound)
   {
+    RCLCPP_WARN_STREAM(node_->get_logger(), "Requested field '" << field_ << "' not found in point cloud!");
     return;
   }
 
@@ -289,13 +363,33 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
   std::vector<cv::Point3f> obj_pts;
   std::vector<cv::Point2f> img_pts;
 
-  // #pragma omp parallel for
+  // #pragma omp parallel for ???????????
+  // Create 3D points for projection
   int size = output_cloud.height * output_cloud.width;
-   RCLCPP_DEBUG_STREAM(node_->get_logger(),"  Create depth image for opencv: " << size);
+  RCLCPP_DEBUG_STREAM(node_->get_logger(),"  Create 3D points for projection: " << size);
+  obj_pts.reserve(size); // Reserve space for better performance
+
   for (int i = 0; i < size; ++i)
   {
-    float X,Y,Z;
-    std::memcpy(&X, &output_cloud.data[i * output_cloud.point_step + xField.offset],sizeof(sizeOfPointField(yField.datatype)));
+    // Check bounds before accessing data buffer
+    size_t point_start = i * output_cloud.point_step;
+    size_t x_access = point_start + xField.offset;
+    size_t y_access = point_start + yField.offset;
+    size_t z_access = point_start + zField.offset;
+    
+    // Validate buffer bounds for coordinate access using correct field sizes
+    if (x_access + sizeOfPointField(xField.datatype) > output_cloud.data.size() ||
+        y_access + sizeOfPointField(yField.datatype) > output_cloud.data.size() ||
+        z_access + sizeOfPointField(zField.datatype) > output_cloud.data.size()) {
+      RCLCPP_WARN_STREAM_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, 
+                                   "Buffer access out of bounds for point " << i << ", skipping point");
+      continue;
+    }
+    
+    // Extract X, Y, Z coordinates with proper type handling
+    float X, Y, Z;
+
+    std::memcpy(&X, &output_cloud.data[i * output_cloud.point_step + xField.offset],sizeof(sizeOfPointField(xField.datatype)));
     std::memcpy(&Y, &output_cloud.data[i * output_cloud.point_step + yField.offset],sizeof(sizeOfPointField(yField.datatype)));
     std::memcpy(&Z, &output_cloud.data[i * output_cloud.point_step + zField.offset],sizeof(sizeOfPointField(zField.datatype)));
     obj_pts.push_back(cv::Point3f(X, Y, Z));
@@ -303,28 +397,64 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
   
   cv::projectPoints(obj_pts, rvec, tvec, intrinsicMatrix, distortionCoefficients, img_pts);
 
-  // #pragma omp parallel for
-  // Loop through points
-   RCLCPP_DEBUG_STREAM(node_->get_logger(),"  Loop through points: " << img_pts.size());        
+  // Process projected points and render to image
+  RCLCPP_DEBUG_STREAM(node_->get_logger(),"  Process projected points: " << img_pts.size());     
   for (size_t i = 0; i < img_pts.size(); ++i)
   {
     int u = int(img_pts[i].x);
     int v = int(img_pts[i].y);
     
-    // Check if point is inside fov of camera
-    if ((u >= 0) && (u < depthImage.image.cols) &&  
-        (v >= 0) && (v < depthImage.image.rows) &&
-        obj_pts[i].z > 0)
+    // // Check if point is inside fov of camera
+    // if ((u >= 0) && (u < depthImage.image.cols) &&  
+    //     (v >= 0) && (v < depthImage.image.rows) &&
+    //     obj_pts[i].z > 0)
+
+    // Check if point is inside field of view and has positive depth
+    // COMMENTED OUT Z > 0 check: This filters out points behind sensor which may be valid lidar data
+    // RELAXED BOUNDS: Allow points slightly outside FOV to capture more lidar data
+    if ((u >= -pixel_size_) && (u < width_ + pixel_size_) &&  
+        (v >= -pixel_size_) && (v < height_ + pixel_size_))
+        // obj_pts[i].z > 0)
     {
-      // add to depth image
-      if(depthImage.image.at<float>(v, u) <= 0.001 || 
-        depthImage.image.at<float>(v, u) > obj_pts[i].z)
+    {
+      // Buffer bounds checking for user field data access
+      // Skip if userField is invalid (only needed for non-depth fields)
+      // COMMENTED OUT: This validation might filter out valid lidar data with extended field types
+      // if (field_ != "depth" && (userField.datatype == 0 || userField.datatype > 8)) {
+      //   continue; // Skip this point if userField is invalid
+      // }
+      
+      size_t point_start = i * output_cloud.point_step;
+      size_t user_field_access = point_start + userField.offset;
+      size_t user_field_size = (field_ == "depth") ? 4 : sizeOfPointField(userField.datatype); // Use 4 bytes for depth, validate userField for others
+      
+      // For multi-component fields like RGBA, need to check access for all components
+      size_t max_user_field_access = user_field_access;
+      if (userField.count == 4) {
+        // RGBA field - check access for 4th component
+        max_user_field_access = user_field_access + (userField.count - 1) * user_field_size;
+      } else if ((userField.datatype == sensor_msgs::msg::PointField::UINT16 && userField.count == 4) ||
+                 (userField.datatype == sensor_msgs::msg::PointField::FLOAT64 && (userField.name == "rgb" || userField.name == "rgba"))) {
+        // Special cases for 16-bit RGBA or 64-bit RGB
+        max_user_field_access = user_field_access + 3 * sizeof(uint16_t); // 3 additional components for RGB
+      }
+      
+      // Validate user field buffer bounds
+      if (max_user_field_access + user_field_size > output_cloud.data.size()) {
+        RCLCPP_WARN_STREAM_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, 
+                                     "User field buffer access out of bounds for point " << i << ", skipping point");
+        continue;
+      }
+      
+      // MASK-BASED DEPTH RENDERING: Step 3 - Process depth points with proper z-buffering
+      // Check if this point should be rendered (z-buffer test)
+      // Only render if:
+      // 1. No depth data exists at this pixel yet (depth buffer == infinity)
+      // 2. OR this point is closer than the existing depth value
+      float current_depth_buffer = depthBuffer.at<float>(v, u);
+      if(current_depth_buffer == std::numeric_limits<float>::max() || current_depth_buffer > obj_pts[i].z)
       {
-        // color values
-        // uint8_t b,g,r;
-        // std::memcpy(&b, &output_cloud.data[i * output_cloud.point_step + rgbField.offset + 0],sizeof(uint8_t));
-        // std::memcpy(&g, &output_cloud.data[i * output_cloud.point_step + rgbField.offset + 1],sizeof(uint8_t));
-        // std::memcpy(&r, &output_cloud.data[i * output_cloud.point_step + rgbField.offset + 2],sizeof(uint8_t));              
+        // RGB field handling is done in the user field processing below           
         
         // draw box around each pixel based on pixel_size param
         int shift = pixel_size_ / 2;
@@ -340,45 +470,109 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
         {
           for(int k = lowerIndex2; k <= upperIndex2; k++)
           {
-            // // color image
-            // cv::Vec3b bgr_pixel;
-            // bgr_pixel[0] = b;
-            // bgr_pixel[1] = g;
-            // bgr_pixel[2] = r;
-            // colorImage.image.at<cv::Vec3b>(j, k) = bgr_pixel;
+            // RGB color handling is done in the user field processing
 
-            //depth image
-            depthImage.image.at<float>(j, k) = obj_pts[i].z;
+            // Update the depth buffer with the closest point
+            depthBuffer.at<float>(j, k) = obj_pts[i].z;
             
-            // user image
+            // Mark this pixel as having real depth data
+            depthMask.at<uint8_t>(j, k) = 255; // 255 = has data, 0 = no data
+            
+            // user image - write data for the closest point (depth buffer was already updated)
             if( (userField.datatype == sensor_msgs::msg::PointField::UINT8   && userField.count == 4) ||
                 (userField.datatype == sensor_msgs::msg::PointField::UINT32  && (userField.name == "rgb" || userField.name == "rgba")) ||
                 (userField.datatype == sensor_msgs::msg::PointField::FLOAT32 && (userField.name == "rgb" || userField.name == "rgba"))
               )
             {
-              uint8_t user1, user2, user3;
-              std::memcpy(&user1, &output_cloud.data[i * output_cloud.point_step + userField.offset + 0],sizeof(uint8_t));
-              std::memcpy(&user2, &output_cloud.data[i * output_cloud.point_step + userField.offset + 1],sizeof(uint8_t));
-              std::memcpy(&user3, &output_cloud.data[i * output_cloud.point_step + userField.offset + 2],sizeof(uint8_t));
-              cv::Vec3b pixel;
-              pixel[0] = user1;
-              pixel[1] = user2;
-              pixel[2] = user3;
-              userImage.image.at<cv::Vec3b>(j, k) = pixel;
+              // uint8_t user1, user2, user3;
+              // std::memcpy(&user1, &output_cloud.data[i * output_cloud.point_step + userField.offset + 0],sizeof(uint8_t));
+              // std::memcpy(&user2, &output_cloud.data[i * output_cloud.point_step + userField.offset + 1],sizeof(uint8_t));
+              // std::memcpy(&user3, &output_cloud.data[i * output_cloud.point_step + userField.offset + 2],sizeof(uint8_t));
+              // cv::Vec3b pixel;
+              // pixel[0] = user1;
+              // pixel[1] = user2;
+              // pixel[2] = user3;
+              // userImage.image.at<cv::Vec3b>(j, k) = pixel;
+
+              // Handle RGB/RGBA fields - these are packed color data
+              if (userField.datatype == sensor_msgs::msg::PointField::UINT32) {
+                // 32-bit packed RGB (most common format)
+                uint32_t rgb_packed;
+                std::memcpy(&rgb_packed, &output_cloud.data[i * output_cloud.point_step + userField.offset], sizeof(uint32_t));
+                uint8_t r = (rgb_packed >> 16) & 0xFF;
+                uint8_t g = (rgb_packed >> 8) & 0xFF;
+                uint8_t b = rgb_packed & 0xFF;
+                cv::Vec3b pixel;
+                pixel[0] = b; // OpenCV uses BGR format
+                pixel[1] = g;
+                pixel[2] = r;
+                userImage.image.at<cv::Vec3b>(j, k) = pixel;
+              } else if (userField.datatype == sensor_msgs::msg::PointField::FLOAT32) {
+                // 32-bit packed RGB as float
+                float rgb_float;
+                std::memcpy(&rgb_float, &output_cloud.data[i * output_cloud.point_step + userField.offset], sizeof(float));
+                uint32_t rgb_packed = *reinterpret_cast<uint32_t*>(&rgb_float);
+                uint8_t r = (rgb_packed >> 16) & 0xFF;
+                uint8_t g = (rgb_packed >> 8) & 0xFF;
+                uint8_t b = rgb_packed & 0xFF;
+                cv::Vec3b pixel;
+                pixel[0] = b; // OpenCV uses BGR format
+                pixel[1] = g;
+                pixel[2] = r;
+                userImage.image.at<cv::Vec3b>(j, k) = pixel;
+              } else {
+                // 4 separate uint8 values (RGBA)
+                uint8_t user1, user2, user3;
+                std::memcpy(&user1, &output_cloud.data[i * output_cloud.point_step + userField.offset + 0], sizeof(uint8_t));
+                std::memcpy(&user2, &output_cloud.data[i * output_cloud.point_step + userField.offset + 1], sizeof(uint8_t));
+                std::memcpy(&user3, &output_cloud.data[i * output_cloud.point_step + userField.offset + 2], sizeof(uint8_t));
+                cv::Vec3b pixel;
+                pixel[0] = user3; // B
+                pixel[1] = user2; // G
+                pixel[2] = user1; // R
+                userImage.image.at<cv::Vec3b>(j, k) = pixel;
+              }
             }
             else if((userField.datatype == sensor_msgs::msg::PointField::UINT16  && userField.count == 4) ||
                     (userField.datatype == sensor_msgs::msg::PointField::FLOAT64 && (userField.name == "rgb" || userField.name == "rgba"))
                     )
             {
-              uint16_t user1, user2, user3;
-              std::memcpy(&user1, &output_cloud.data[i * output_cloud.point_step + userField.offset + 0],sizeof(uint16_t));
-              std::memcpy(&user2, &output_cloud.data[i * output_cloud.point_step + userField.offset + 1],sizeof(uint16_t));
-              std::memcpy(&user3, &output_cloud.data[i * output_cloud.point_step + userField.offset + 2],sizeof(uint16_t));
-              cv::Vec3w bgr_pixel;
-              bgr_pixel[0] = user1;
-              bgr_pixel[1] = user2;
-              bgr_pixel[2] = user3;
-              userImage.image.at<cv::Vec3w>(j, k) = bgr_pixel;
+              // uint16_t user1, user2, user3;
+              // std::memcpy(&user1, &output_cloud.data[i * output_cloud.point_step + userField.offset + 0],sizeof(uint16_t));
+              // std::memcpy(&user2, &output_cloud.data[i * output_cloud.point_step + userField.offset + 1],sizeof(uint16_t));
+              // std::memcpy(&user3, &output_cloud.data[i * output_cloud.point_step + userField.offset + 2],sizeof(uint16_t));
+              // cv::Vec3w bgr_pixel;
+              // bgr_pixel[0] = user1;
+              // bgr_pixel[1] = user2;
+              // bgr_pixel[2] = user3;
+              // userImage.image.at<cv::Vec3w>(j, k) = bgr_pixel;
+
+              // Handle 16-bit RGB/RGBA fields - fix offset calculations
+              if (userField.datatype == sensor_msgs::msg::PointField::FLOAT64) {
+                // 64-bit packed RGB as double
+                double rgb_double;
+                std::memcpy(&rgb_double, &output_cloud.data[i * output_cloud.point_step + userField.offset], sizeof(double));
+                uint64_t rgb_packed = *reinterpret_cast<uint64_t*>(&rgb_double);
+                uint16_t r = (rgb_packed >> 32) & 0xFFFF;
+                uint16_t g = (rgb_packed >> 16) & 0xFFFF;
+                uint16_t b = rgb_packed & 0xFFFF;
+                cv::Vec3w bgr_pixel;
+                bgr_pixel[0] = b; // B
+                bgr_pixel[1] = g; // G
+                bgr_pixel[2] = r; // R
+                userImage.image.at<cv::Vec3w>(j, k) = bgr_pixel;
+              } else {
+                // 4 separate uint16 values (RGBA) - use proper sizeof() for offsets
+                uint16_t user1, user2, user3;
+                std::memcpy(&user1, &output_cloud.data[i * output_cloud.point_step + userField.offset + 0 * sizeof(uint16_t)], sizeof(uint16_t));
+                std::memcpy(&user2, &output_cloud.data[i * output_cloud.point_step + userField.offset + 1 * sizeof(uint16_t)], sizeof(uint16_t));
+                std::memcpy(&user3, &output_cloud.data[i * output_cloud.point_step + userField.offset + 2 * sizeof(uint16_t)], sizeof(uint16_t));
+                cv::Vec3w bgr_pixel;
+                bgr_pixel[0] = user3; // B
+                bgr_pixel[1] = user2; // G
+                bgr_pixel[2] = user1; // R
+                userImage.image.at<cv::Vec3w>(j, k) = bgr_pixel;
+              }
             }
             else if((userField.datatype == sensor_msgs::msg::PointField::UINT8))
             {
@@ -423,12 +617,281 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
     }
   }
 
-  // Check timer
-  auto endTime = std::chrono::steady_clock::now();
-  auto totalTime = endTime - beginTime;
-  double timeMS = totalTime.count() / 1000.0;
-  RCLCPP_DEBUG_STREAM(node_->get_logger(), " timer: " << timeMS);
+  // MASK-BASED RENDERING: Step 4 - Final compositing
+  // Composite the final image by blending data with gradient background
+  // Where mask == 255 (has data): use actual data values
+  // Where mask == 0 (no data): use gradient background values
+  RCLCPP_DEBUG_STREAM(node_->get_logger(), "  Final Compositing");
+  
+  if(field_ == "depth") {
+    for (int row = 0; row < height_; row++) {
+      for (int col = 0; col < width_; col++) {
+        if (depthMask.at<uint8_t>(row, col) == 255) {
+          // Pixel has real depth data - convert depth to grayscale and display as white/gray
+          float depth_value = depthBuffer.at<float>(row, col);
+          // Normalize depth to 0-255 range (assuming max depth ~10 meters)
+          uint8_t intensity = static_cast<uint8_t>(std::min(255.0f, depth_value * 25.5f)); // 10m -> 255
+          
+          cv::Vec3b& pixel = depthImage.image.at<cv::Vec3b>(row, col);
+          pixel[0] = intensity; // B
+          pixel[1] = intensity; // G  
+          pixel[2] = intensity; // R (grayscale)
+        } else {
+          // Pixel has no depth data - use gradient background value
+          cv::Vec3b background_pixel = gradientBackground.at<cv::Vec3b>(row, col);
+          depthImage.image.at<cv::Vec3b>(row, col) = background_pixel;
+        }
+      }
+    }
+  } else if(field_ == "intensity") {
+    // Handle raw intensity field data with gradient background overlay
+    RCLCPP_DEBUG_STREAM(node_->get_logger(), "Processing raw intensity field with gradient background");
+    
+    // Create intensity image with proper data type preservation
+    cv::Mat intensityImage;
+    cv::Mat intensityMask = cv::Mat::zeros(height_, width_, CV_8UC1);
+    std::string encoding;
+    
+    // Initialize intensity image based on field data type to preserve precision
+    if (userField.datatype == sensor_msgs::msg::PointField::UINT8) {
+      intensityImage = cv::Mat::zeros(height_, width_, CV_8UC1);
+      encoding = "mono8";
+    } else if (userField.datatype == sensor_msgs::msg::PointField::UINT16) {
+      intensityImage = cv::Mat::zeros(height_, width_, CV_16UC1);
+      encoding = "mono16";
+    } else if (userField.datatype == sensor_msgs::msg::PointField::FLOAT32) {
+      intensityImage = cv::Mat::zeros(height_, width_, CV_32FC1);
+      encoding = "32FC1";
+    } else if (userField.datatype == sensor_msgs::msg::PointField::FLOAT64) {
+      intensityImage = cv::Mat::zeros(height_, width_, CV_64FC1);
+      encoding = "64FC1";
+    } else {
+      // Default to 8-bit if unsupported type
+      intensityImage = cv::Mat::zeros(height_, width_, CV_8UC1);
+      encoding = "mono8";
+    }
+    
+    // Iterate through the point cloud and extract intensity data
+    for (size_t i = 0; i < obj_pts.size(); ++i) {
+      int u = static_cast<int>(img_pts[i].x);
+      int v = static_cast<int>(img_pts[i].y);
 
+      if (u >= 0 && u < width_ && v >= 0 && v < height_) {
+        
+        // Buffer bounds checking for intensity field data access
+        // Skip if userField is invalid
+        // COMMENTED OUT: This validation might filter out valid lidar intensity data with extended field types
+        // if (userField.datatype == 0 || userField.datatype > 8) {
+        //   continue; // Skip this point if userField is invalid
+        // }
+        
+        size_t point_start = i * output_cloud.point_step;
+        size_t intensity_field_access = point_start + userField.offset;
+        size_t intensity_field_size = sizeOfPointField(userField.datatype);
+        
+        // Validate intensity field buffer bounds
+        if (intensity_field_access + intensity_field_size > output_cloud.data.size()) {
+          RCLCPP_WARN_STREAM_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, 
+                                       "Intensity field buffer access out of bounds for point " << i << ", skipping point");
+          continue;
+        }
+        
+        // Extract raw intensity value preserving original data type
+        if (userField.datatype == sensor_msgs::msg::PointField::UINT8) {
+          uint8_t intensity_value;
+          std::memcpy(&intensity_value, &output_cloud.data[i * output_cloud.point_step + userField.offset], sizeof(uint8_t));
+          intensityImage.at<uint8_t>(v, u) = intensity_value;
+          intensityMask.at<uint8_t>(v, u) = 255;
+        } else if (userField.datatype == sensor_msgs::msg::PointField::UINT16) {
+          uint16_t intensity_value;
+          std::memcpy(&intensity_value, &output_cloud.data[i * output_cloud.point_step + userField.offset], sizeof(uint16_t));
+          if (need_endian_swap) intensity_value = swap_endian(intensity_value);
+          intensityImage.at<uint16_t>(v, u) = intensity_value;
+          intensityMask.at<uint8_t>(v, u) = 255;
+        } else if (userField.datatype == sensor_msgs::msg::PointField::FLOAT32) {
+          float intensity_value;
+          std::memcpy(&intensity_value, &output_cloud.data[i * output_cloud.point_step + userField.offset], sizeof(float));
+          if (need_endian_swap) intensity_value = swap_endian(intensity_value);
+          intensityImage.at<float>(v, u) = intensity_value;
+          intensityMask.at<uint8_t>(v, u) = 255;
+        } else if (userField.datatype == sensor_msgs::msg::PointField::FLOAT64) {
+          double intensity_value;
+          std::memcpy(&intensity_value, &output_cloud.data[i * output_cloud.point_step + userField.offset], sizeof(double));
+          if (need_endian_swap) intensity_value = swap_endian(intensity_value);
+          intensityImage.at<double>(v, u) = intensity_value;
+          intensityMask.at<uint8_t>(v, u) = 255;
+        }
+        
+        // Debug: Log intensity values occasionally
+        if (i % 1000 == 0) {
+          RCLCPP_DEBUG_STREAM(node_->get_logger(), "Point " << i << " processed for intensity");
+        }
+      }
+    }
+    
+    // For visualization, convert to BGR with gradient background overlay
+    cv::Mat intensityBGR = cv::Mat::zeros(height_, width_, CV_8UC3);
+    
+    // Apply gradient background where no intensity data exists
+    for (int row = 0; row < height_; row++) {
+      for (int col = 0; col < width_; col++) {
+        if (intensityMask.at<uint8_t>(row, col) == 255) {
+          // Has intensity data - convert to grayscale for display
+          uint8_t display_value = 128; // Default
+          
+          if (userField.datatype == sensor_msgs::msg::PointField::UINT8) {
+            display_value = intensityImage.at<uint8_t>(row, col);
+          } else if (userField.datatype == sensor_msgs::msg::PointField::UINT16) {
+            // Scale 16-bit to 8-bit for display
+            display_value = static_cast<uint8_t>(intensityImage.at<uint16_t>(row, col) >> 8);
+          } else if (userField.datatype == sensor_msgs::msg::PointField::FLOAT32) {
+            // Clamp float to 0-255 range
+            float val = intensityImage.at<float>(row, col);
+            display_value = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, val)));
+          } else if (userField.datatype == sensor_msgs::msg::PointField::FLOAT64) {
+            // Clamp double to 0-255 range
+            double val = intensityImage.at<double>(row, col);
+            display_value = static_cast<uint8_t>(std::min(255.0, std::max(0.0, val)));
+          }
+          
+          // Set as grayscale (intensity data)
+          intensityBGR.at<cv::Vec3b>(row, col) = cv::Vec3b(display_value, display_value, display_value);
+        } else {
+          // No intensity data - use gradient background
+          float saturation_ratio = 1.0f - (float)row / (float)height_;
+          uint8_t blue_value = (uint8_t)(200 * saturation_ratio);
+          uint8_t green_value = (uint8_t)(80 * saturation_ratio);
+          uint8_t red_value = (uint8_t)(0 * saturation_ratio);
+          intensityBGR.at<cv::Vec3b>(row, col) = cv::Vec3b(blue_value, green_value, red_value);
+        }
+      }
+    }
+    
+    // Convert and publish intensity image with gradient background
+    sensor_msgs::msg::Image output_msg;
+    std_msgs::msg::Header header;
+    header.stamp = output_cloud.header.stamp;
+    header.frame_id = frame_id_;
+    cv_bridge::CvImage(header, "bgr8", intensityBGR).toImageMsg(output_msg);
+    sensor_msgs::msg::Image::ConstPtr output_ptr = std::make_shared<sensor_msgs::msg::Image>(output_msg);
+    callback_(output_ptr);
+    return;
+  } else {
+    // For other fields (intensity, etc.), apply gradient background where no data exists
+    if(userImage.encoding == sensor_msgs::image_encodings::TYPE_8UC3) {
+      for (int row = 0; row < height_; row++) {
+        for (int col = 0; col < width_; col++) {
+          if (depthMask.at<uint8_t>(row, col) == 0) {
+            // No data at this pixel - use medium blue saturation-based gradient background
+            // Medium blue color: RGB(0, 80, 200) -> BGR(200, 80, 0)
+            float saturation_ratio = 1.0f - (float)row / (float)height_;
+            uint8_t blue_value = (uint8_t)(200 * saturation_ratio);
+            uint8_t green_value = (uint8_t)(80 * saturation_ratio);
+            uint8_t red_value = (uint8_t)(0 * saturation_ratio);
+            cv::Vec3b& pixel = userImage.image.at<cv::Vec3b>(row, col);
+            pixel[0] = blue_value; // B
+            pixel[1] = green_value; // G
+            pixel[2] = red_value;   // R
+          }
+        }
+      }
+    } else if(userImage.encoding == sensor_msgs::image_encodings::TYPE_16UC3) {
+      for (int row = 0; row < height_; row++) {
+        for (int col = 0; col < width_; col++) {
+          if (depthMask.at<uint8_t>(row, col) == 0) {
+            // No data at this pixel - use medium blue saturation-based gradient background
+            // Medium blue color scaled to 16-bit: RGB(0, 80, 200) -> BGR(51400, 20560, 0)
+            float saturation_ratio = 1.0f - (float)row / (float)height_;
+            uint16_t blue_value = (uint16_t)(51400 * saturation_ratio);
+            uint16_t green_value = (uint16_t)(20560 * saturation_ratio);
+            uint16_t red_value = (uint16_t)(0 * saturation_ratio);
+            cv::Vec3w& pixel = userImage.image.at<cv::Vec3w>(row, col);
+            pixel[0] = blue_value; // B
+            pixel[1] = green_value; // G
+            pixel[2] = red_value;   // R
+          }
+          // Point cloud data takes priority - no modification needed for pixels with data
+        }
+      }
+    } else if(userImage.encoding == sensor_msgs::image_encodings::TYPE_8UC1 ||
+              userImage.encoding == sensor_msgs::image_encodings::TYPE_8SC1 ||
+              userImage.encoding == sensor_msgs::image_encodings::TYPE_16UC1 ||
+              userImage.encoding == sensor_msgs::image_encodings::TYPE_16SC1 ||
+              userImage.encoding == sensor_msgs::image_encodings::TYPE_32FC1 ||
+              userImage.encoding == sensor_msgs::image_encodings::TYPE_64FC1) {
+      // Convert single-channel user image to BGR format with color gradient background
+      cv_bridge::CvImage userImageBGR;
+      userImageBGR.header = output_cloud.header;
+      userImageBGR.header.frame_id = frame_id_;
+      userImageBGR.encoding = sensor_msgs::image_encodings::BGR8;
+      userImageBGR.image = cv::Mat::zeros(height_, width_, CV_8UC3);
+      
+      for (int row = 0; row < height_; row++) {
+        for (int col = 0; col < width_; col++) {
+          if (depthMask.at<uint8_t>(row, col) == 255) {
+            // Pixel has real data - convert to grayscale display
+            uint8_t display_value = 128; // Default gray value
+            
+            // Just use the raw data directly like the original code
+            if (userImage.encoding == sensor_msgs::image_encodings::TYPE_8UC1) {
+              uint8_t raw_value = userImage.image.at<uint8_t>(row, col);
+              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
+              pixel[0] = raw_value; // B
+              pixel[1] = raw_value; // G  
+              pixel[2] = raw_value; // R (grayscale)
+            } else if (userImage.encoding == sensor_msgs::image_encodings::TYPE_8SC1) {
+              int8_t raw_value = userImage.image.at<int8_t>(row, col);
+              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
+              pixel[0] = raw_value; // B
+              pixel[1] = raw_value; // G  
+              pixel[2] = raw_value; // R (grayscale)
+            } else if (userImage.encoding == sensor_msgs::image_encodings::TYPE_16UC1) {
+              uint16_t raw_value = userImage.image.at<uint16_t>(row, col);
+              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
+              pixel[0] = raw_value; // B
+              pixel[1] = raw_value; // G  
+              pixel[2] = raw_value; // R (grayscale)
+            } else if (userImage.encoding == sensor_msgs::image_encodings::TYPE_16SC1) {
+              int16_t raw_value = userImage.image.at<int16_t>(row, col);
+              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
+              pixel[0] = raw_value; // B
+              pixel[1] = raw_value; // G  
+              pixel[2] = raw_value; // R (grayscale)
+            } else if (userImage.encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
+              float raw_value = userImage.image.at<float>(row, col);
+              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
+              pixel[0] = raw_value; // B
+              pixel[1] = raw_value; // G  
+              pixel[2] = raw_value; // R (grayscale)
+            } else if (userImage.encoding == sensor_msgs::image_encodings::TYPE_64FC1) {
+              double raw_value = userImage.image.at<double>(row, col);
+              cv::Vec3b& pixel = userImageBGR.image.at<cv::Vec3b>(row, col);
+              pixel[0] = raw_value; // B
+              pixel[1] = raw_value; // G  
+              pixel[2] = raw_value; // R (grayscale)
+            }
+          } else {
+            // Pixel has no data - use color gradient background
+            cv::Vec3b background_pixel = gradientBackground.at<cv::Vec3b>(row, col);
+            userImageBGR.image.at<cv::Vec3b>(row, col) = background_pixel;
+          }
+        }
+      }
+      
+      // Use the BGR user image for output
+      sensor_msgs::msg::Image output_msg;
+      userImageBGR.toImageMsg(output_msg);
+      sensor_msgs::msg::Image::ConstPtr output_ptr = std::make_shared<sensor_msgs::msg::Image>(output_msg);
+      callback_(output_ptr);
+      return;
+    }
+  }
+
+  // Performance timing
+  auto endTime = std::chrono::steady_clock::now();
+  auto totalTime = std::chrono::duration_cast<std::chrono::microseconds>(endTime - beginTime);
+  double timeMS = totalTime.count() / 1000.0;
+  RCLCPP_DEBUG_STREAM(node_->get_logger(), "Processing time: " << timeMS << "ms");
   sensor_msgs::msg::Image output_msg;
   if(field_ == "depth") depthImage.toImageMsg(output_msg);
   else userImage.toImageMsg(output_msg);
@@ -446,20 +909,19 @@ bool PointCloud2Subscriber::compareFieldsOffset(sensor_msgs::msg::PointField& fi
 
 inline int sizeOfPointField(int datatype)
 {
-  if ((datatype == sensor_msgs::msg::PointField::INT8) || (datatype == sensor_msgs::msg::PointField::UINT8))
+  if (datatype == sensor_msgs::msg::PointField::INT8 || datatype == sensor_msgs::msg::PointField::UINT8)
     return 1;
-  else if ((datatype == sensor_msgs::msg::PointField::INT16) || (datatype == sensor_msgs::msg::PointField::UINT16))
+  else if (datatype == sensor_msgs::msg::PointField::INT16 || datatype == sensor_msgs::msg::PointField::UINT16)
     return 2;
-  else if ((datatype == sensor_msgs::msg::PointField::INT32) || (datatype == sensor_msgs::msg::PointField::UINT32) ||
-      (datatype == sensor_msgs::msg::PointField::FLOAT32))
+  else if (datatype == sensor_msgs::msg::PointField::INT32 || datatype == sensor_msgs::msg::PointField::UINT32 ||
+      datatype == sensor_msgs::msg::PointField::FLOAT32)
     return 4;
   else if (datatype == sensor_msgs::msg::PointField::FLOAT64)
     return 8;
   else
   {
-    std::stringstream err;
-    err << "PointField of type " << datatype << " does not exist";
-    throw std::runtime_error(err.str());
+    // Default to 4 bytes for unknown types (reasonable assumption for most extended types)
+    return 4;
   }
   return -1;
 }

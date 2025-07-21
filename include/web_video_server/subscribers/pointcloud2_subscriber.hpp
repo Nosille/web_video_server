@@ -32,7 +32,24 @@ class PointCloud2Subscriber : public RosSubscriber
     void subscriberCallback(const sensor_msgs::msg::PointCloud2::ConstPtr &input_msg);
     
     static bool compareFieldsOffset(sensor_msgs::msg::PointField& field1, sensor_msgs::msg::PointField& field2);
-    static inline int sizeOfPointField(int datatype);
+    static inline int sizeOfPointField(int datatype) {
+      if ((datatype == sensor_msgs::msg::PointField::INT8) || (datatype == sensor_msgs::msg::PointField::UINT8))
+        return 1;
+      else if ((datatype == sensor_msgs::msg::PointField::INT16) || (datatype == sensor_msgs::msg::PointField::UINT16))
+        return 2;
+      else if ((datatype == sensor_msgs::msg::PointField::INT32) || (datatype == sensor_msgs::msg::PointField::UINT32) ||
+        (datatype == sensor_msgs::msg::PointField::FLOAT32))
+        return 4;
+      else if (datatype == sensor_msgs::msg::PointField::FLOAT64)
+        return 8;
+      else
+      {
+        std::stringstream err;
+        err << "PointField of type " << datatype << " does not exist";
+        throw std::runtime_error(err.str());
+      }
+      return -1;
+    }
     
   private:
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ros_sub_;

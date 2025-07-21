@@ -172,11 +172,23 @@ void ImageStreamer::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr 
     int input_width = img.cols;
     int input_height = img.rows;
 
+    // Validate image dimensions
+    if (input_width <= 0 || input_height <= 0) {
+      RCLCPP_WARN(node_->get_logger(), "Invalid image dimensions: %dx%d", input_width, input_height);
+      return;
+    }
+
     if (output_width_ == -1) {
       output_width_ = input_width;
     }
     if (output_height_ == -1) {
       output_height_ = input_height;
+    }
+
+    // Validate output dimensions
+    if (output_width_ <= 0 || output_height_ <= 0) {
+      RCLCPP_WARN(node_->get_logger(), "Invalid output dimensions: %dx%d", output_width_, output_height_);
+      return;
     }
 
     if (invert_) {

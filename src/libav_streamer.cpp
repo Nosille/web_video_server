@@ -294,7 +294,7 @@ void LibavStreamer::sendImage(
     }
   }
 
-  av_packet_unref(pkt);
+  av_packet_free(&pkt);
 }
 
 LibavStreamerType::LibavStreamerType(
