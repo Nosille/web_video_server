@@ -6,6 +6,8 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <sstream>
+#include <stdexcept>
 
 #include <tf2/exceptions.h>
 #include <tf2_ros/buffer.h>

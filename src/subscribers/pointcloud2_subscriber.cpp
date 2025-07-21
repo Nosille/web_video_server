@@ -107,7 +107,7 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
   //Sort input cloud fields by field offset - IMPORTANT: Use input_msg fields, not output_cloud
    RCLCPP_DEBUG_STREAM(node_->get_logger(),"  Sort Fields");
   std::vector<sensor_msgs::msg::PointField> sortedFields(input_msg->fields);
-  std::sort(sortedFields.begin(), sortedFields.end(), compareFieldsOffset);
+  std::sort(sortedFields.begin(), sortedFields.end(), PointCloud2Subscriber::compareFieldsOffset);
 
   // Find fields we need in the cloud
   bool xFound = false, yFound = false, zFound = false;
@@ -378,9 +378,9 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
     size_t z_access = point_start + zField.offset;
     
     // Validate buffer bounds for coordinate access using correct field sizes
-    if (x_access + sizeOfPointField(xField.datatype) > output_cloud.data.size() ||
-        y_access + sizeOfPointField(yField.datatype) > output_cloud.data.size() ||
-        z_access + sizeOfPointField(zField.datatype) > output_cloud.data.size()) {
+    if (x_access + PointCloud2Subscriber::sizeOfPointField(xField.datatype) > output_cloud.data.size() ||
+        y_access + PointCloud2Subscriber::sizeOfPointField(yField.datatype) > output_cloud.data.size() ||
+        z_access + PointCloud2Subscriber::sizeOfPointField(zField.datatype) > output_cloud.data.size()) {
       RCLCPP_WARN_STREAM_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, 
                                    "Buffer access out of bounds for point " << i << ", skipping point");
       continue;
@@ -389,9 +389,9 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
     // Extract X, Y, Z coordinates with proper type handling
     float X, Y, Z;
 
-    std::memcpy(&X, &output_cloud.data[i * output_cloud.point_step + xField.offset],sizeof(sizeOfPointField(xField.datatype)));
-    std::memcpy(&Y, &output_cloud.data[i * output_cloud.point_step + yField.offset],sizeof(sizeOfPointField(yField.datatype)));
-    std::memcpy(&Z, &output_cloud.data[i * output_cloud.point_step + zField.offset],sizeof(sizeOfPointField(zField.datatype)));
+    std::memcpy(&X, &output_cloud.data[i * output_cloud.point_step + xField.offset], sizeof(float));
+    std::memcpy(&Y, &output_cloud.data[i * output_cloud.point_step + yField.offset], sizeof(float));
+    std::memcpy(&Z, &output_cloud.data[i * output_cloud.point_step + zField.offset], sizeof(float));
     obj_pts.push_back(cv::Point3f(X, Y, Z));
   }
   
@@ -416,7 +416,6 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
         (v >= -pixel_size_) && (v < height_ + pixel_size_))
         // obj_pts[i].z > 0)
     {
-    {
       // Buffer bounds checking for user field data access
       // Skip if userField is invalid (only needed for non-depth fields)
       // COMMENTED OUT: This validation might filter out valid lidar data with extended field types
@@ -426,7 +425,7 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
       
       size_t point_start = i * output_cloud.point_step;
       size_t user_field_access = point_start + userField.offset;
-      size_t user_field_size = (field_ == "depth") ? 4 : sizeOfPointField(userField.datatype); // Use 4 bytes for depth, validate userField for others
+      size_t user_field_size = (field_ == "depth") ? 4 : PointCloud2Subscriber::sizeOfPointField(userField.datatype); // Use 4 bytes for depth, validate userField for others
       
       // For multi-component fields like RGBA, need to check access for all components
       size_t max_user_field_access = user_field_access;
@@ -687,7 +686,7 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
         
         size_t point_start = i * output_cloud.point_step;
         size_t intensity_field_access = point_start + userField.offset;
-        size_t intensity_field_size = sizeOfPointField(userField.datatype);
+        size_t intensity_field_size = PointCloud2Subscriber::sizeOfPointField(userField.datatype);
         
         // Validate intensity field buffer bounds
         if (intensity_field_access + intensity_field_size > output_cloud.data.size()) {
@@ -705,19 +704,16 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
         } else if (userField.datatype == sensor_msgs::msg::PointField::UINT16) {
           uint16_t intensity_value;
           std::memcpy(&intensity_value, &output_cloud.data[i * output_cloud.point_step + userField.offset], sizeof(uint16_t));
-          if (need_endian_swap) intensity_value = swap_endian(intensity_value);
           intensityImage.at<uint16_t>(v, u) = intensity_value;
           intensityMask.at<uint8_t>(v, u) = 255;
         } else if (userField.datatype == sensor_msgs::msg::PointField::FLOAT32) {
           float intensity_value;
           std::memcpy(&intensity_value, &output_cloud.data[i * output_cloud.point_step + userField.offset], sizeof(float));
-          if (need_endian_swap) intensity_value = swap_endian(intensity_value);
           intensityImage.at<float>(v, u) = intensity_value;
           intensityMask.at<uint8_t>(v, u) = 255;
         } else if (userField.datatype == sensor_msgs::msg::PointField::FLOAT64) {
           double intensity_value;
           std::memcpy(&intensity_value, &output_cloud.data[i * output_cloud.point_step + userField.offset], sizeof(double));
-          if (need_endian_swap) intensity_value = swap_endian(intensity_value);
           intensityImage.at<double>(v, u) = intensity_value;
           intensityMask.at<uint8_t>(v, u) = 255;
         }
@@ -907,30 +903,10 @@ bool PointCloud2Subscriber::compareFieldsOffset(sensor_msgs::msg::PointField& fi
   return (field1.offset < field2.offset);
 }
 
-inline int sizeOfPointField(int datatype)
-{
-  if (datatype == sensor_msgs::msg::PointField::INT8 || datatype == sensor_msgs::msg::PointField::UINT8)
-    return 1;
-  else if (datatype == sensor_msgs::msg::PointField::INT16 || datatype == sensor_msgs::msg::PointField::UINT16)
-    return 2;
-  else if (datatype == sensor_msgs::msg::PointField::INT32 || datatype == sensor_msgs::msg::PointField::UINT32 ||
-      datatype == sensor_msgs::msg::PointField::FLOAT32)
-    return 4;
-  else if (datatype == sensor_msgs::msg::PointField::FLOAT64)
-    return 8;
-  else
-  {
-    // Default to 4 bytes for unknown types (reasonable assumption for most extended types)
-    return 4;
-  }
-  return -1;
-}
-
 std::shared_ptr<RosSubscriber> PointCloud2SubscriberType::create_subscriber(rclcpp::Node::SharedPtr node)
 {
   return std::shared_ptr<RosSubscriber>(
       new PointCloud2Subscriber(node));
 }
-
 
 }

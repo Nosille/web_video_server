@@ -1,0 +1,88 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-8eda0f9e2a0bdbc8eba5.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.15"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3
+					]
+				}
+			],
+			"name" : "",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "web_video_server",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-uninstall-5368ef0f99a044538629.json",
+					"name" : "uninstall",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "web_video_server::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-web_video_server-4a0e7811ac9ba91c1dad.json",
+					"name" : "web_video_server",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "web_video_server_node::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-web_video_server_node-b568567325ea82cf0649.json",
+					"name" : "web_video_server_node",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "web_video_server_uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-web_video_server_uninstall-c35f91c8369d1f50200d.json",
+					"name" : "web_video_server_uninstall",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/jcfurey/wvs_ws/src/web_video_server/build/web_video_server",
+		"source" : "/home/jcfurey/wvs_ws/src/web_video_server"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 6
+	}
+}
