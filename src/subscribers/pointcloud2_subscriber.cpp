@@ -5,6 +5,7 @@
 #include <std_msgs/msg/header.hpp>
 #include <tf2/LinearMath/Transform.h>
 #include <tf2/convert.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #ifdef CV_BRIDGE_USES_OLD_HEADERS
 #include <cv_bridge/cv_bridge.h>
@@ -94,22 +95,10 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
   {
     transform = tf_buffer_->lookupTransform(frame_id_, input_msg->header.frame_id, input_msg->header.stamp);
       
-      // Create composed transform: first apply spatial transform, then optical frame orientation
-      geometry_msgs::msg::TransformStamped composed_transform;
-      composed_transform.header = transform.header;
-      composed_transform.header.frame_id = frame_id_;
-      composed_transform.child_frame_id = input_msg->header.frame_id + "_optical";
-      
-      // Compose transforms: T_composed = T_optical * T_spatial
-      // This applies the spatial transform first, then the optical frame rotation
-      tf2::Transform tf_spatial, tf_optical, tf_composed;
-      tf2::fromMsg(transform.transform, tf_spatial);
-      tf2::fromMsg(transform_optical_.transform, tf_optical);
-      // tf_composed = tf_optical * tf_spatial;
-      tf_composed = tf_spatial * tf_optical;
-      composed_transform.transform = tf2::toMsg(tf_composed);
-      
-      tf2::doTransform(*input_msg, output_cloud, composed_transform);
+      // Transform into a z-forward orientation for opencv
+      transform_optical_.header = transform.header;
+      tf2::doTransform(transform.transform, transform.transform, transform_optical_);
+      tf2::doTransform(*input_msg, output_cloud, transform);
   }
   catch (tf2::TransformException &ex) 
   {
