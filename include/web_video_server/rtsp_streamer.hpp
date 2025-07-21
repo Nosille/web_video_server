@@ -69,6 +69,16 @@ struct RTSPClient
   uint16_t rtcp_port;
   std::string client_ip;
   std::atomic<bool> active{true};
+  
+  // Performance optimizations
+  int rtp_socket_fd = -1;  // Reuse RTP socket
+  struct sockaddr_in cached_addr{0};  // Pre-computed socket address
+  
+  ~RTSPClient() {
+    if (rtp_socket_fd >= 0) {
+      close(rtp_socket_fd);
+    }
+  }
 };
 
 class RTSPStreamer

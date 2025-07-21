@@ -606,15 +606,19 @@ void RTSPStreamer::imageCallback(const sensor_msgs::msg::Image::ConstPtr & msg)
     initializeEncoder();
   }
   
-  // Add frame to queue
+  // Add frame to queue with adaptive queue management
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    frame_queue_.push(frame);
     
-    // Keep queue size reasonable
-    while (frame_queue_.size() > 5) {
+    // Adaptive queue size based on streaming state
+    const size_t max_queue_size = streaming_ ? 3 : 1;  // Smaller queue for lower latency
+    
+    // Drop older frames if queue is full (maintain low latency)
+    while (frame_queue_.size() >= max_queue_size) {
       frame_queue_.pop();
     }
+    
+    frame_queue_.push(std::move(frame));  // Use move to avoid copying
   }
   
   frame_cv_.notify_one();
@@ -628,18 +632,32 @@ void RTSPStreamer::encodeAndSendFrame(const cv::Mat & frame)
     return;
   }
   
-  // Convert frame to AVFrame
-  AVFrame* input_frame = av_frame_alloc();
-  av_image_fill_arrays(
-    input_frame->data, input_frame->linesize,
-    frame.data, AV_PIX_FMT_BGR24, width_, height_, 1);
+  // Optimize: Check if we need to convert color space
+  AVFrame* input_frame = nullptr;
+  bool needs_conversion = true;
   
-  // Convert color space
+  // Check if input is already in the right format (optimization opportunity)
+  if (frame.channels() == 3 && frame.depth() == CV_8U) {
+    input_frame = av_frame_alloc();
+    av_image_fill_arrays(
+      input_frame->data, input_frame->linesize,
+      frame.data, AV_PIX_FMT_BGR24, width_, height_, 1);
+  } else {
+    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000, 
+                        "Unexpected frame format, may impact performance");
+    input_frame = av_frame_alloc();
+    av_image_fill_arrays(
+      input_frame->data, input_frame->linesize,
+      frame.data, AV_PIX_FMT_BGR24, width_, height_, 1);
+  }
+  
+  // Convert color space with optimized scaling algorithm
   if (!sws_context_) {
+    // Use faster scaling algorithm for real-time streaming
     sws_context_ = sws_getContext(
       width_, height_, AV_PIX_FMT_BGR24,
       width_, height_, AV_PIX_FMT_YUV420P,
-      SWS_BILINEAR, nullptr, nullptr, nullptr);
+      SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
   }
   
   sws_scale(
@@ -650,13 +668,15 @@ void RTSPStreamer::encodeAndSendFrame(const cv::Mat & frame)
   
   av_frame_free(&input_frame);
   
-  // Set frame properties
-  frame_->pts = rtp_timestamp_;
+  // Set frame properties with proper timestamp calculation
+  static uint64_t frame_count = 0;
+  frame_->pts = frame_count++;
   
   // Encode frame
   int ret = avcodec_send_frame(codec_context_, frame_);
   if (ret < 0) {
-    RCLCPP_ERROR(node_->get_logger(), "Error sending frame to encoder");
+    RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+                         "Error sending frame to encoder");
     return;
   }
   
@@ -665,22 +685,24 @@ void RTSPStreamer::encodeAndSendFrame(const cv::Mat & frame)
     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
       break;
     } else if (ret < 0) {
-      RCLCPP_ERROR(node_->get_logger(), "Error receiving packet from encoder");
+      RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+                          "Error receiving packet from encoder");
       break;
     }
     
-  // Send H.264 NAL units as RTP packets
-  // First, check if we need to send SPS/PPS before the frame
-  if (packet_->flags & AV_PKT_FLAG_KEY) {
-    // This is a keyframe, send SPS/PPS first if available
-    if (codec_context_->extradata && codec_context_->extradata_size > 0) {
-      sendSPSPPS();
+    // Send H.264 NAL units as RTP packets
+    // First, check if we need to send SPS/PPS before the frame
+    if (packet_->flags & AV_PKT_FLAG_KEY) {
+      // This is a keyframe, send SPS/PPS first if available
+      if (codec_context_->extradata && codec_context_->extradata_size > 0) {
+        sendSPSPPS();
+      }
     }
-  }
-  
-  sendH264NALUnit(packet_->data, packet_->size, rtp_timestamp_);
     
-    rtp_timestamp_ += 3000; // Increment timestamp (90kHz clock)
+    sendH264NALUnit(packet_->data, packet_->size, rtp_timestamp_);
+      
+    // Calculate proper timestamp increment based on framerate
+    rtp_timestamp_ += 90000 / fps_; // 90kHz clock divided by fps
     
     av_packet_unref(packet_);
   }
@@ -693,13 +715,18 @@ void RTSPStreamer::sendH264NALUnit(const uint8_t* nal_data, size_t nal_size, uin
     // Single NAL unit
     sendRTPPacket(nal_data, nal_size, true, timestamp);
   } else {
-    // Fragmented NAL unit (FU-A)
+    // Fragmented NAL unit (FU-A) - optimized for performance
     uint8_t nal_header = nal_data[0];
     const uint8_t* nal_payload = nal_data + 1;
     size_t nal_payload_size = nal_size - 1;
     
     // FU-A indicator: F=0, NRI from original NAL, Type=28 (FU-A)
     uint8_t fu_indicator = (nal_header & 0xE0) | NALU_TYPE_FU_A;
+    
+    // Pre-allocate fragment buffer to avoid repeated allocations
+    static thread_local std::vector<uint8_t> fragment_buffer;
+    fragment_buffer.clear();
+    fragment_buffer.reserve(max_rtp_payload_size);
     
     size_t offset = 0;
     bool first_fragment = true;
@@ -715,16 +742,18 @@ void RTSPStreamer::sendH264NALUnit(const uint8_t* nal_data, size_t nal_size, uin
         first_fragment = false;
       }
       
-      if (offset + fragment_size >= nal_payload_size) {
+      bool is_last_fragment = (offset + fragment_size >= nal_payload_size);
+      if (is_last_fragment) {
         fu_header |= 0x40;  // End bit
       }
 
-      std::vector<uint8_t> rtp_packet;
-      rtp_packet.push_back(fu_indicator);
-      rtp_packet.push_back(fu_header);
-      rtp_packet.insert(rtp_packet.end(), nal_payload + offset, nal_payload + offset + fragment_size);
+      // Efficient buffer construction
+      fragment_buffer.clear();
+      fragment_buffer.push_back(fu_indicator);
+      fragment_buffer.push_back(fu_header);
+      fragment_buffer.insert(fragment_buffer.end(), nal_payload + offset, nal_payload + offset + fragment_size);
 
-      sendRTPPacket(rtp_packet.data(), rtp_packet.size(), (offset + fragment_size >= nal_payload_size), timestamp);
+      sendRTPPacket(fragment_buffer.data(), fragment_buffer.size(), is_last_fragment, timestamp);
 
       offset += fragment_size;
     }
@@ -794,25 +823,37 @@ void RTSPStreamer::sendSPSPPS() {
 void RTSPStreamer::sendRTPPacket(const uint8_t* data, size_t size, bool marker, uint32_t timestamp) {
   RTSPStreamer::RTPHeader header = createRTPHeader(marker, timestamp);
 
+  // Pre-allocate packet buffer to avoid repeated allocations
+  static thread_local std::vector<uint8_t> packet_buffer;
+  const size_t total_size = sizeof(RTSPStreamer::RTPHeader) + size;
+  packet_buffer.resize(total_size);
+  
+  // Copy header and data in one operation
+  std::memcpy(packet_buffer.data(), &header, sizeof(RTSPStreamer::RTPHeader));
+  std::memcpy(packet_buffer.data() + sizeof(RTSPStreamer::RTPHeader), data, size);
+
   // Send RTP packet to all clients
   std::lock_guard<std::mutex> lock(clients_mutex_);
   for (auto& client_pair : clients_) {
     auto& client = client_pair.second;
     if (client->active && client->rtp_port > 0) {
-      struct sockaddr_in client_addr;
-      client_addr.sin_family = AF_INET;
-      client_addr.sin_port = htons(client->rtp_port);
-      inet_pton(AF_INET, client->client_ip.c_str(), &client_addr.sin_addr);
+      // Use pre-computed socket address if available
+      if (client->cached_addr.sin_family == 0) {
+        client->cached_addr.sin_family = AF_INET;
+        client->cached_addr.sin_port = htons(client->rtp_port);
+        inet_pton(AF_INET, client->client_ip.c_str(), &client->cached_addr.sin_addr);
+      }
 
-      int rtp_socket = socket(AF_INET, SOCK_DGRAM, 0);
-      if (rtp_socket >= 0) {
-        std::vector<uint8_t> packet_data(sizeof(RTSPStreamer::RTPHeader) + size);
-        std::memcpy(packet_data.data(), &header, sizeof(RTSPStreamer::RTPHeader));
-        std::memcpy(packet_data.data() + sizeof(RTSPStreamer::RTPHeader), data, size);
-
-        sendto(rtp_socket, packet_data.data(), packet_data.size(), 0,
-               (struct sockaddr*)&client_addr, sizeof(client_addr));
-        close(rtp_socket);
+      // Reuse socket for better performance
+      if (client->rtp_socket_fd < 0) {
+        client->rtp_socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        // Enable non-blocking mode for better performance
+        fcntl(client->rtp_socket_fd, F_SETFL, O_NONBLOCK);
+      }
+      
+      if (client->rtp_socket_fd >= 0) {
+        sendto(client->rtp_socket_fd, packet_buffer.data(), total_size, 0,
+               (struct sockaddr*)&client->cached_addr, sizeof(client->cached_addr));
       }
     }
   }
@@ -873,20 +914,33 @@ void RTSPStreamer::initializeEncoder()
     return;
   }
   
-  // Set codec parameters
+  // Set codec parameters optimized for real-time streaming
   codec_context_->bit_rate = bitrate_;
   codec_context_->width = width_;
   codec_context_->height = height_;
   codec_context_->time_base = {1, fps_};
   codec_context_->framerate = {fps_, 1};
-  codec_context_->gop_size = 10;
-  codec_context_->max_b_frames = 1;
+  codec_context_->gop_size = fps_;  // GOP size equal to framerate for better seeking
+  codec_context_->max_b_frames = 0;  // Disable B-frames for lower latency
   codec_context_->pix_fmt = AV_PIX_FMT_YUV420P;
+  
+  // Optimize for low latency streaming
+  codec_context_->flags |= AV_CODEC_FLAG_LOW_DELAY;
+  codec_context_->flags2 |= AV_CODEC_FLAG2_FAST;
   
   // Set codec options for real-time streaming
   if (codec_->id == AV_CODEC_ID_H264) {
     av_opt_set(codec_context_->priv_data, "preset", "ultrafast", 0);
     av_opt_set(codec_context_->priv_data, "tune", "zerolatency", 0);
+    av_opt_set(codec_context_->priv_data, "profile", "baseline", 0);
+    av_opt_set(codec_context_->priv_data, "level", "3.1", 0);
+    av_opt_set(codec_context_->priv_data, "crf", "23", 0);  // Constant rate factor for quality
+    av_opt_set(codec_context_->priv_data, "threads", "auto", 0);
+    
+    // Optimize for real-time encoding
+    av_opt_set(codec_context_->priv_data, "rc-lookahead", "0", 0);
+    av_opt_set(codec_context_->priv_data, "sync-lookahead", "0", 0);
+    av_opt_set(codec_context_->priv_data, "sliced-threads", "1", 0);
   }
   
   // Open codec
@@ -918,6 +972,9 @@ void RTSPStreamer::initializeEncoder()
     RCLCPP_ERROR(node_->get_logger(), "Failed to allocate packet");
     return;
   }
+  
+  RCLCPP_INFO(node_->get_logger(), "H.264 encoder initialized: %dx%d@%dfps, bitrate=%d", 
+             width_, height_, fps_, bitrate_);
 }
 
 void RTSPStreamer::cleanupEncoder()
