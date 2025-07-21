@@ -105,7 +105,8 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
       tf2::Transform tf_spatial, tf_optical, tf_composed;
       tf2::fromMsg(transform.transform, tf_spatial);
       tf2::fromMsg(transform_optical_.transform, tf_optical);
-      tf_composed = tf_optical * tf_spatial;
+      // tf_composed = tf_optical * tf_spatial;
+      tf_composed = tf_spatial * tf_optical;
       composed_transform.transform = tf2::toMsg(tf_composed);
       
       tf2::doTransform(*input_msg, output_cloud, composed_transform);
