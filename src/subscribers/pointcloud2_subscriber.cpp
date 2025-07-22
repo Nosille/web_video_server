@@ -412,12 +412,13 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
     //     (v >= 0) && (v < depthImage.image.rows) &&
     //     obj_pts[i].z > 0)
 
-    // Check if point is inside field of view and has positive depth
-    // COMMENTED OUT Z > 0 check: This filters out points behind sensor which may be valid lidar data
+    // Check if point is inside field of view and has valid projection
+    // Filter out rear points that are incorrectly projected into front view
+    // Keep points that are properly in front of sensor for current camera view
     // RELAXED BOUNDS: Allow points slightly outside FOV to capture more lidar data
     if ((u >= -pixel_size_) && (u < width_ + pixel_size_) &&  
-        (v >= -pixel_size_) && (v < height_ + pixel_size_))
-        // obj_pts[i].z > 0)
+        (v >= -pixel_size_) && (v < height_ + pixel_size_) &&
+        obj_pts[i].z > 0.1)  // Filter out points behind/very close to sensor that cause incorrect projection
     {
       // Buffer bounds checking for user field data access
       // Skip if userField is invalid (only needed for non-depth fields)
