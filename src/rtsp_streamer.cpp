@@ -1137,31 +1137,14 @@ std::shared_ptr<RTSPStreamer> RTSPStreamerManager::createStreamer(
 {
   std::lock_guard<std::mutex> lock(streamers_mutex_);
   
-  // Check if streamer already exists for this topic
-  auto it = streamers_.find(topic);
+  // Create a unique stream key combining topic and codec for better identification
+  std::string stream_key = topic + "_" + codec;
+  
+  // Check if streamer already exists for this exact topic
+  auto it = streamers_.find(stream_key);
   if (it != streamers_.end() && it->second->isActive()) {
+    RCLCPP_INFO(node_->get_logger(), "Reusing existing RTSP stream for %s", stream_key.c_str());
     return it->second;
-  }
-  
-  // Look for an existing active streamer that we can repurpose
-  // This enables dynamic topic switching on the same RTSP port
-  std::shared_ptr<RTSPStreamer> existing_streamer = nullptr;
-  for (const auto& pair : streamers_) {
-    if (pair.second->isActive() && pair.second->isStreaming()) {
-      // Found an active streamer - we can switch it to the new topic
-      existing_streamer = pair.second;
-      
-      // Remove the old topic entry
-      streamers_.erase(pair.first);
-      break;
-    }
-  }
-  
-  if (existing_streamer) {
-    // Switch the existing streamer to the new topic
-    existing_streamer->switchTopic(topic);
-    streamers_[topic] = existing_streamer;
-    return existing_streamer;
   }
   
   // Assign port if not specified
@@ -1169,9 +1152,10 @@ std::shared_ptr<RTSPStreamer> RTSPStreamerManager::createStreamer(
     rtsp_port = next_port_++;
   }
   
-  // Create new streamer
+  // Always create a new independent streamer - no more topic switching
+  RCLCPP_INFO(node_->get_logger(), "Creating new RTSP stream for %s on port %d", stream_key.c_str(), rtsp_port);
   auto streamer = std::make_shared<RTSPStreamer>(node_, topic, codec, rtsp_port);
-  streamers_[topic] = streamer;
+  streamers_[stream_key] = streamer;
   
   return streamer;
 }
@@ -1179,18 +1163,32 @@ std::shared_ptr<RTSPStreamer> RTSPStreamerManager::createStreamer(
 void RTSPStreamerManager::removeStreamer(const std::string & topic)
 {
   std::lock_guard<std::mutex> lock(streamers_mutex_);
-  auto it = streamers_.find(topic);
-  if (it != streamers_.end()) {
-    it->second->stop();
-    streamers_.erase(it);
+  
+  // Remove all streams for this topic (any codec)
+  auto it = streamers_.begin();
+  while (it != streamers_.end()) {
+    if (it->first.find(topic + "_") == 0) {
+      RCLCPP_INFO(node_->get_logger(), "Removing RTSP stream for %s", it->first.c_str());
+      it->second->stop();
+      it = streamers_.erase(it);
+    } else {
+      ++it;
+    }
   }
 }
 
 std::shared_ptr<RTSPStreamer> RTSPStreamerManager::getStreamer(const std::string & topic)
 {
   std::lock_guard<std::mutex> lock(streamers_mutex_);
-  auto it = streamers_.find(topic);
-  return (it != streamers_.end()) ? it->second : nullptr;
+  
+  // Search for any stream matching the topic (first found)
+  for (const auto& pair : streamers_) {
+    if (pair.first.find(topic + "_") == 0) {
+      return pair.second;
+    }
+  }
+  
+  return nullptr;
 }
 
 std::vector<std::string> RTSPStreamerManager::getActiveStreams() const

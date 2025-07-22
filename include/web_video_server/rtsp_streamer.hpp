@@ -98,6 +98,7 @@ public:
   std::string getTopic() const { return topic_; }
   std::string getStreamUrl() const;
   bool isActive() const { return active_; }
+  int getPort() const { return rtsp_port_; }
   
   // Dynamic topic switching
   void switchTopic(const std::string& new_topic);

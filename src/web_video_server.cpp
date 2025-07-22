@@ -463,9 +463,9 @@ bool WebVideoServer::handle_rtsp_stream(
   // Start the streamer
   streamer->start();
 
-  // Return JSON response with stream URL that mirrors HTTP pattern
+  // Return JSON response with stream URL using the streamer port
   std::stringstream json_response;
-  json_response << "{\"rtsp_url\":\"rtsp://localhost:" << rtsp_port_ << "/stream?topic=" << topic << "&type=" << type << "\"}"; 
+  json_response << "{\"rtsp_url\":\"rtsp://localhost:" << streamer->getPort() << "/stream?topic=" << topic << "&type=" << type << "\"}";
 
   async_web_server_cpp::HttpReply::builder(async_web_server_cpp::HttpReply::ok)
   .header("Connection", "close")
