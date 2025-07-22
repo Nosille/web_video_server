@@ -1,6 +1,39 @@
-.cproject
-.project
-.vscode/
+# — Colcon / CMake / ROS 2 build artifacts
 build/
 install/
 log/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# — ROS 2 runtime / tooling
+.ros/                   # ROS 2 middleware cache
+rosbag2_*               # rosbag2 SQLite files
+*.db3                   # rosbag2 default format
+
+# — Visual Studio Code
+.vscode/                # workspace settings, launch.json, tasks.json, etc.
+*.code-workspace        # saved VS Code workspace files
+
+# — Python (for ROS 2 Python packages or scripts)
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+env/
+ENV/
+env.bak/
+dist/
+build/
+*.egg-info/
+
+# — Editor / OS cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# — Logs & temporary files
+*.log
