@@ -41,7 +41,7 @@ void ImageTransportSubscriber::subscribe(const async_web_server_cpp::HttpRequest
              transport, qos);
 }
 
-void ImageTransportSubscriber::subscriberCallback(const sensor_msgs::msg::Image::ConstPtr &input_msg)
+void ImageTransportSubscriber::subscriberCallback(const sensor_msgs::msg::Image::ConstSharedPtr &input_msg)
 {
   callback_(input_msg);
 }

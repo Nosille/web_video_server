@@ -9,7 +9,7 @@
 //
 //    * Redistributions in binary form must reproduce the above copyright
 //      notice, this list of conditions and the following disclaimer in the
-//      documentation and/or other materials provided with the distribution.
+//      documentation and/or distribution with the distribution.
 //
 //    * Neither the name of the copyright holder nor the names of its
 //      contributors may be used to endorse or promote products derived from
@@ -29,18 +29,6 @@
 
 #pragma once
 
-extern "C"
-{
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/intreadwrite.h>
-#include <libavformat/avio.h>
-#include <libswscale/swscale.h>
-#include <libavutil/opt.h>
-#include <libavutil/mathematics.h>
-#include <libavutil/imgutils.h>
-}
-
 #include <chrono>
 #include <memory>
 #include <string>
@@ -54,32 +42,13 @@ extern "C"
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "rtsp_async_server_cpp/rtsp_server.hpp"
+#include "rtsp_async_server_cpp/media_stream.hpp"
 #include "web_video_server/subscribers/image_transport_subscriber.hpp"
 #include "web_video_server/subscribers/pointcloud2_subscriber.hpp"
 
 namespace web_video_server
 {
-
-struct RTSPClient
-{
-  int socket_fd;
-  std::string session_id;
-  std::string transport_info;
-  uint16_t rtp_port;
-  uint16_t rtcp_port;
-  std::string client_ip;
-  std::atomic<bool> active{true};
-  
-  // Performance optimizations
-  int rtp_socket_fd = -1;  // Reuse RTP socket
-  struct sockaddr_in cached_addr{0};  // Pre-computed socket address
-  
-  ~RTSPClient() {
-    if (rtp_socket_fd >= 0) {
-      close(rtp_socket_fd);
-    }
-  }
-};
 
 class RTSPStreamer
 {
@@ -105,23 +74,13 @@ public:
   bool isStreaming() const { return streaming_; }
 
 private:
-  void rtspServerThread();
-  void handleRTSPRequest(int client_socket);
-  void handleOptions(int client_socket, const std::string& uri, const std::string& request);
-  void handleDescribe(int client_socket, const std::string& uri, const std::string& request);
-  void handleSetup(int client_socket, const std::string& transport, const std::string& request);
-  void handlePlay(int client_socket, const std::string& session, const std::string& request);
-  void handleTeardown(int client_socket, const std::string& session, const std::string& request);
+  // RTSP request handler for the async server
+  bool handleRTSPRequest(
+    const rtsp_async_server_cpp::RTSPRequest& request,
+    std::shared_ptr<rtsp_async_server_cpp::RTSPConnection> connection);
   
-  void rtpStreamThread();
-  void imageCallback(const sensor_msgs::msg::Image::ConstPtr & msg);
-  void encodeAndSendFrame(const cv::Mat & frame);
-  
-  void initializeEncoder();
-  void cleanupEncoder();
-  
-  std::string generateSessionId();
-  std::string generateSDPDescription();
+  void imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
+  uint32_t getTimeStamp();
   
   rclcpp::Node::SharedPtr node_;
   std::string topic_;
@@ -131,81 +90,18 @@ private:
   std::shared_ptr<RosSubscriber> subscriber_;
   std::map<std::string, std::shared_ptr<SubscriberType>> subscriber_types_;
   
-  // RTSP Server
-  int server_socket_;
-  std::thread server_thread_;
+  // RTSP server from rtsp_async_server_cpp
+  std::shared_ptr<rtsp_async_server_cpp::RTSPServer> rtsp_server_;
   std::atomic<bool> active_;
   std::atomic<bool> streaming_;
-  
-  // RTP streaming
-  std::thread rtp_thread_;
-  std::map<std::string, std::shared_ptr<RTSPClient>> clients_;
-  std::mutex clients_mutex_;
-  
-  // Encoding
-  AVFormatContext * format_context_;
-  const AVCodec * codec_;
-  AVCodecContext * codec_context_;
-  AVStream * video_stream_;
-  AVFrame * frame_;
-  AVPacket * packet_;
-  struct SwsContext * sws_context_;
-  
-  // Frame processing
-  std::queue<cv::Mat> frame_queue_;
-  std::mutex frame_mutex_;
-  std::condition_variable frame_cv_;
   
   // Stream parameters
   int width_;
   int height_;
   int fps_;
   int bitrate_;
-  uint32_t rtp_timestamp_;
-  uint16_t rtp_sequence_;
-  uint32_t rtp_ssrc_;
-  
-  // RTP packet structure
-  struct RTPHeader {
-    uint8_t version_padding_extension_csrc_count;
-    uint8_t marker_payload_type;
-    uint16_t sequence_number;
-    uint32_t timestamp;
-    uint32_t ssrc;
-  } __attribute__((packed));
-  
-  // H.264 NAL Unit types
-  enum NALUnitType {
-    NALU_TYPE_UNDEFINED = 0,
-    NALU_TYPE_SLICE = 1,
-    NALU_TYPE_DPA = 2,
-    NALU_TYPE_DPB = 3,
-    NALU_TYPE_DPC = 4,
-    NALU_TYPE_IDR = 5,
-    NALU_TYPE_SEI = 6,
-    NALU_TYPE_SPS = 7,
-    NALU_TYPE_PPS = 8,
-    NALU_TYPE_AUD = 9,
-    NALU_TYPE_EOSEQ = 10,
-    NALU_TYPE_EOSTREAM = 11,
-    NALU_TYPE_FILL = 12,
-    NALU_TYPE_STAP_A = 24,
-    NALU_TYPE_STAP_B = 25,
-    NALU_TYPE_MTAP16 = 26,
-    NALU_TYPE_MTAP24 = 27,
-    NALU_TYPE_FU_A = 28,
-    NALU_TYPE_FU_B = 29
-  };
-  
-  // Helper methods for RTP
-  void sendRTPPacket(const uint8_t* data, size_t size, bool marker, uint32_t timestamp);
-  void sendH264NALUnit(const uint8_t* nal_data, size_t nal_size, uint32_t timestamp);
-  void sendSPSPPS();
-  std::vector<uint8_t> findNALUnits(const uint8_t* data, size_t size);
-  RTPHeader createRTPHeader(bool marker, uint32_t timestamp);
   
   std::chrono::steady_clock::time_point start_time_;
-  std::mutex encode_mutex_;
 };
 
 class RTSPStreamerManager

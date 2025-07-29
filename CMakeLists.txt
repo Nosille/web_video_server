@@ -8,6 +8,7 @@ endif()
 find_package(ament_cmake_ros REQUIRED)
 
 find_package(async_web_server_cpp REQUIRED)
+find_package(rtsp_async_server_cpp REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -73,7 +74,7 @@ add_library(${PROJECT_NAME} SHARED
   src/subscribers/image_transport_subscriber.cpp
 )
 
-ament_target_dependencies(${PROJECT_NAME} rclcpp tf2 tf2_ros tf2_sensor_msgs tf2_geometry_msgs)
+ament_target_dependencies(${PROJECT_NAME} rclcpp tf2 tf2_ros tf2_sensor_msgs tf2_geometry_msgs rtsp_async_server_cpp)
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(${PROJECT_NAME}

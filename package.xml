@@ -23,6 +23,7 @@
   <build_depend>cv_bridge</build_depend>
   <build_depend>image_transport</build_depend>
   <build_depend>async_web_server_cpp</build_depend>
+  <build_depend>rtsp_async_server_cpp</build_depend>
   <build_depend>ffmpeg</build_depend>
   <build_depend>sensor_msgs</build_depend>
   <build_depend>boost</build_depend>
@@ -32,6 +33,7 @@
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>image_transport</exec_depend>
   <exec_depend>async_web_server_cpp</exec_depend>
+  <exec_depend>rtsp_async_server_cpp</exec_depend>
   <exec_depend>ffmpeg</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>boost</exec_depend>

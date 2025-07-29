@@ -21,7 +21,7 @@ class ImageTransportSubscriber : public RosSubscriber
                            const std::string& topic, 
                            const ImageCallback& callback);    
     
-    void subscriberCallback(const sensor_msgs::msg::Image::ConstPtr &input_msg);
+    void subscriberCallback(const sensor_msgs::msg::Image::ConstSharedPtr &input_msg);
   
   private:
     image_transport::Subscriber ros_sub_;

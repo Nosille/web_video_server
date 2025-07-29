@@ -334,8 +334,39 @@ bool WebVideoServer::handle_list_streams(
 
   connection->write(
     "<html>"
-    "<head><title>ROS Image Topic List</title></head>"
-    "<body><h1>Available ROS Image Topics:</h1>");
+    "<head>"
+    "<title>ROS Video Server - Image Topics</title>"
+    "<style>"
+    "body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }"
+    "h1 { color: #333; border-bottom: 2px solid #0078d4; padding-bottom: 10px; }"
+    "h2 { color: #555; margin-top: 30px; }"
+    "ul { list-style-type: none; padding: 0; }"
+    "li { background-color: white; margin: 5px 0; padding: 10px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }"
+    "a { text-decoration: none; color: #0078d4; margin-right: 10px; }"
+    "a:hover { text-decoration: underline; }"
+    ".rtsp-link { color: #ff6b35; font-weight: bold; }"
+    ".http-link { color: #0078d4; }"
+    ".info { background-color: #e7f3ff; padding: 15px; border-radius: 5px; margin-bottom: 20px; }"
+    "</style>"
+    "</head>"
+    "<body>"
+    "<h1>ROS Video Server - Available Topics</h1>");
+    
+  if (rtsp_enabled_) {
+    connection->write(
+      "<div class=\"info\">"
+      "<strong>RTSP Streaming Available:</strong><br>"
+      "RTSP streams are available on port ");
+    connection->write(std::to_string(rtsp_port_));
+    connection->write(
+      ". Click on the RTSP Stream links below to copy the RTSP URL for use in media players like VLC.<br>"
+      "<em>Example usage:</em> vlc rtsp://localhost:");
+    connection->write(std::to_string(rtsp_port_));
+    connection->write("/your_topic_name"
+      "</div>");
+  }
+  
+  connection->write("<h2>Image Topics:</h2>");
   connection->write("<ul>");
   for (std::string & camera_info_topic : camera_info_topics) {
     if (boost::algorithm::ends_with(camera_info_topic, "/camera_info")) {
@@ -355,10 +386,18 @@ bool WebVideoServer::handle_list_streams(
           connection->write("</a> (");
           connection->write("<a href=\"/stream?topic=");
           connection->write(*image_topic_itr);
-          connection->write("\">Stream</a>) (");
+          connection->write("\">HTTP Stream</a>) (");
           connection->write("<a href=\"/snapshot?topic=");
           connection->write(*image_topic_itr);
           connection->write("\">Snapshot</a>)");
+          // Add RTSP streaming link if RTSP is enabled
+          if (rtsp_enabled_) {
+            connection->write(" (<a href=\"rtsp://localhost:");
+            connection->write(std::to_string(rtsp_port_));
+            connection->write("/");
+            connection->write(*image_topic_itr);
+            connection->write("\">RTSP Stream</a>)");
+          }
           connection->write("</li>");
 
           image_topic_itr = image_topics.erase(image_topic_itr);
@@ -382,10 +421,18 @@ bool WebVideoServer::handle_list_streams(
     connection->write("</a> (");
     connection->write("<a href=\"/stream?topic=");
     connection->write(*image_topic_itr);
-    connection->write("\">Stream</a>) (");
+    connection->write("\">HTTP Stream</a>) (");
     connection->write("<a href=\"/snapshot?topic=");
     connection->write(*image_topic_itr);
     connection->write("\">Snapshot</a>)");
+    // Add RTSP streaming link if RTSP is enabled
+    if (rtsp_enabled_) {
+      connection->write(" (<a href=\"rtsp://localhost:");
+      connection->write(std::to_string(rtsp_port_));
+      connection->write("/");
+      connection->write(*image_topic_itr);
+      connection->write("\">RTSP Stream</a>)");
+    }
     connection->write("</li>");
 
     image_topic_itr = image_topics.erase(image_topic_itr);

@@ -73,7 +73,7 @@ void PointCloud2Subscriber::subscribe(const async_web_server_cpp::HttpRequest &r
   ros_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(topic, qos, std::bind(&PointCloud2Subscriber::subscriberCallback, this, std::placeholders::_1));
 }
 
-void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointCloud2::ConstPtr &input_msg)
+void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg)
 {
   RCLCPP_DEBUG_STREAM(node_->get_logger(),"Update PointCloud2: " << frame_id_);
 
@@ -773,7 +773,7 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
     header.stamp = output_cloud.header.stamp;
     header.frame_id = frame_id_;
     cv_bridge::CvImage(header, "bgr8", intensityBGR).toImageMsg(output_msg);
-    sensor_msgs::msg::Image::ConstPtr output_ptr = std::make_shared<sensor_msgs::msg::Image>(output_msg);
+    sensor_msgs::msg::Image::ConstSharedPtr output_ptr = std::make_shared<sensor_msgs::msg::Image>(output_msg);
     callback_(output_ptr);
     return;
   } else {
@@ -861,7 +861,7 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
       // Use the original user image (now with gradient background) for output
       sensor_msgs::msg::Image output_msg;
       userImage.toImageMsg(output_msg);
-      sensor_msgs::msg::Image::ConstPtr output_ptr = std::make_shared<sensor_msgs::msg::Image>(output_msg);
+      sensor_msgs::msg::Image::ConstSharedPtr output_ptr = std::make_shared<sensor_msgs::msg::Image>(output_msg);
       callback_(output_ptr);
       return;
     }
@@ -876,7 +876,7 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
   if(field_ == "depth") depthImage.toImageMsg(output_msg);
   else userImage.toImageMsg(output_msg);
 
-  sensor_msgs::msg::Image::ConstPtr output_ptr = std::make_shared<sensor_msgs::msg::Image>(output_msg);
+  sensor_msgs::msg::Image::ConstSharedPtr output_ptr = std::make_shared<sensor_msgs::msg::Image>(output_msg);
   callback_(output_ptr);
 
   return;

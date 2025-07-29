@@ -31,7 +31,7 @@ class PointCloud2Subscriber : public RosSubscriber
                            const std::string& topic, 
                            const ImageCallback& callback);    
     
-    void subscriberCallback(const sensor_msgs::msg::PointCloud2::ConstPtr &input_msg);
+    void subscriberCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg);
     
     static bool compareFieldsOffset(sensor_msgs::msg::PointField& field1, sensor_msgs::msg::PointField& field2);
     static inline int sizeOfPointField(int datatype) {

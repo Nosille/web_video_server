@@ -9,7 +9,7 @@
 //
 //    * Redistributions in binary form must reproduce the above copyright
 //      notice, this list of conditions and the following disclaimer in the
-//      documentation and/or other materials provided with the distribution.
+//      documentation and/or materials provided with the distribution.
 //
 //    * Neither the name of the copyright holder nor the names of its
 //      contributors may be used to endorse or promote products derived from
@@ -29,23 +29,12 @@
 
 #include "web_video_server/rtsp_streamer.hpp"
 
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <random>
-#include <sstream>
-#include <algorithm>
-#include <cstring>
-
-#ifdef CV_BRIDGE_USES_OLD_HEADERS
-#include "cv_bridge/cv_bridge.h"
-#else
-#include "cv_bridge/cv_bridge.hpp"
-#endif
-
-#include "sensor_msgs/image_encodings.hpp"
+#include "rtsp_async_server_cpp/rtsp_server.hpp"
+#include "rtsp_async_server_cpp/media_stream.hpp"
+#include "async_web_server_cpp/http_request.hpp"
+#include <boost/bind.hpp>
+#include <cv_bridge/cv_bridge.hpp>
+#include <sensor_msgs/image_encodings.hpp>
 
 using namespace std::chrono_literals;
 
@@ -54,42 +43,40 @@ namespace web_video_server
 
 RTSPStreamer::RTSPStreamer(
   rclcpp::Node::SharedPtr node,
-  const std::string & topic,
-  const std::string & codec_name,
+  const std::string& topic,
+  const std::string& codec_name,
   int rtsp_port)
 : node_(node),
   topic_(topic),
   codec_name_(codec_name),
   rtsp_port_(rtsp_port),
-  server_socket_(-1),
   active_(false),
   streaming_(false),
-  format_context_(nullptr),
-  codec_(nullptr),
-  codec_context_(nullptr),
-  video_stream_(nullptr),
-  frame_(nullptr),
-  packet_(nullptr),
-  sws_context_(nullptr),
   width_(640),
   height_(480),
   fps_(30),
-  bitrate_(1000000),
-  rtp_timestamp_(0),
-  rtp_sequence_(0),
-  rtp_ssrc_(0)
+  bitrate_(1000000)
 {
   // Initialize subscriber types
   subscriber_types_["image"] = std::make_shared<ImageTransportSubscriberType>();
   subscriber_types_["pointcloud2"] = std::make_shared<PointCloud2SubscriberType>();
-  
-  // Generate random SSRC for RTP
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<uint32_t> dis(0, UINT32_MAX);
-  rtp_ssrc_ = dis(gen);
-  
+
   start_time_ = std::chrono::steady_clock::now();
+
+  // Create RTSP server and media stream
+  try {
+    rtsp_server_ = std::make_shared<rtsp_async_server_cpp::RTSPServer>(
+      "0.0.0.0", std::to_string(rtsp_port),
+      boost::bind(&RTSPStreamer::handleRTSPRequest, this, _1, _2),
+      2);
+
+    // Create H264 media stream
+    auto media_stream = std::make_shared<rtsp_async_server_cpp::H264MediaStream>(
+      topic_, width_, height_, fps_, bitrate_);
+    rtsp_server_->addMediaStream(topic_, media_stream);
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(node_->get_logger(), "Failed to create RTSP server: %s", e.what());
+  }
 }
 
 RTSPStreamer::~RTSPStreamer()
@@ -102,52 +89,21 @@ void RTSPStreamer::start()
   if (active_) {
     return;
   }
-  
+
   RCLCPP_INFO(node_->get_logger(), "Starting RTSP stream for topic: %s", topic_.c_str());
-  
-  // Create server socket
-  server_socket_ = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_socket_ < 0) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to create RTSP server socket");
-    return;
-  }
-  
-  // Set socket options
-  int opt = 1;
-  if (setsockopt(server_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-    RCLCPP_WARN(node_->get_logger(), "Failed to set socket options");
-  }
-  
-  // Bind socket
-  struct sockaddr_in server_addr;
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(rtsp_port_);
-  
-  if (bind(server_socket_, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to bind RTSP server socket to port %d", rtsp_port_);
-    close(server_socket_);
-    return;
-  }
-  
-  // Listen for connections
-  if (listen(server_socket_, 5) < 0) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to listen on RTSP server socket");
-    close(server_socket_);
-    return;
-  }
-  
-  active_ = true;
-  
-  // Start RTSP server thread
-  server_thread_ = std::thread(&RTSPStreamer::rtspServerThread, this);
-  
-  // Start RTP streaming thread
-  rtp_thread_ = std::thread(&RTSPStreamer::rtpStreamThread, this);
-  
+
+  // Start the RTSP server in a separate thread
+  std::thread([this]() {
+    try {
+      rtsp_server_->run();
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(node_->get_logger(), "RTSP server error: %s", e.what());
+    }
+  }).detach();
+
   // Subscribe to ROS topic
   std::string subscriber_type = "image";  // Default to image
-  
+
   // Try to determine subscriber type based on topic
   auto tnat = node_->get_topic_names_and_types();
   for (const auto& topic_and_types : tnat) {
@@ -161,22 +117,25 @@ void RTSPStreamer::start()
       break;
     }
   }
-  
+
   if (subscriber_types_.find(subscriber_type) != subscriber_types_.end()) {
     subscriber_ = subscriber_types_[subscriber_type]->create_subscriber(node_);
-    
+
     // Create a dummy HTTP request for subscriber configuration
     async_web_server_cpp::HttpRequest dummy_request;
     dummy_request.query = "qos_profile=default";
-    
+
     subscriber_->subscribe(
       dummy_request,
       topic_,
       std::bind(&RTSPStreamer::imageCallback, this, std::placeholders::_1)
     );
   }
-  
+
   RCLCPP_INFO(node_->get_logger(), "RTSP stream started on port %d for topic %s", rtsp_port_, topic_.c_str());
+
+  active_ = true;
+  streaming_ = true;
 }
 
 void RTSPStreamer::switchTopic(const std::string& new_topic)
@@ -193,19 +152,11 @@ void RTSPStreamer::switchTopic(const std::string& new_topic)
   // Reset subscriber
   subscriber_.reset();
   
-  // Clear frame queue
-  {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    while (!frame_queue_.empty()) {
-      frame_queue_.pop();
-    }
-  }
-  
-  // Cleanup and reinitialize encoder to reset state
-  cleanupEncoder();
-  if (streaming_) {
-    initializeEncoder();
-  }
+  // Create new media stream for the new topic
+  auto media_stream = std::make_shared<rtsp_async_server_cpp::H264MediaStream>(
+    topic_, width_, height_, fps_, bitrate_);
+  rtsp_server_->removeMediaStream(topic_);
+  rtsp_server_->addMediaStream(topic_, media_stream);
   
   // Determine new subscriber type
   std::string subscriber_type = "image";  // Default to image
@@ -247,872 +198,84 @@ void RTSPStreamer::stop()
   if (!active_) {
     return;
   }
-  
+
   RCLCPP_INFO(node_->get_logger(), "Stopping RTSP stream for topic: %s", topic_.c_str());
-  
+
   active_ = false;
   streaming_ = false;
-  
-  // Close server socket
-  if (server_socket_ >= 0) {
-    close(server_socket_);
-    server_socket_ = -1;
+
+  // Stop the RTSP server
+  if (rtsp_server_) {
+    rtsp_server_->stop();
   }
-  
-  // Close all client connections
-  {
-    std::lock_guard<std::mutex> lock(clients_mutex_);
-    for (auto& client_pair : clients_) {
-      client_pair.second->active = false;
-      if (client_pair.second->socket_fd >= 0) {
-        close(client_pair.second->socket_fd);
-      }
-    }
-    clients_.clear();
-  }
-  
-  // Join threads
-  if (server_thread_.joinable()) {
-    server_thread_.join();
-  }
-  
-  if (rtp_thread_.joinable()) {
-    frame_cv_.notify_all();
-    rtp_thread_.join();
-  }
-  
+
   // Reset subscriber
   subscriber_.reset();
-  
-  // Cleanup encoder
-  cleanupEncoder();
 }
 
 std::string RTSPStreamer::getStreamUrl() const
 {
-  return "rtsp://localhost:" + std::to_string(rtsp_port_) + "/stream?topic=" + topic_ + "&type=" + codec_name_;
+  return "rtsp://localhost:" + std::to_string(rtsp_port_) + "/" + topic_;
 }
 
-void RTSPStreamer::rtspServerThread()
+bool RTSPStreamer::handleRTSPRequest(
+  const rtsp_async_server_cpp::RTSPRequest& request,
+  std::shared_ptr<rtsp_async_server_cpp::RTSPConnection> connection)
 {
-  while (active_) {
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    
-    int client_socket = accept(server_socket_, (struct sockaddr*)&client_addr, &client_len);
-    if (client_socket < 0) {
-      if (active_) {
-        RCLCPP_ERROR(node_->get_logger(), "Failed to accept RTSP client connection");
-      }
-      continue;
-    }
-    
-    // Handle client in separate thread
-    std::thread([this, client_socket]() {
-      handleRTSPRequest(client_socket);
-    }).detach();
-  }
+  // The rtsp_async_server_cpp library handles RTSP requests internally
+  // This is just a placeholder for custom request handling if needed
+  RCLCPP_DEBUG(node_->get_logger(), "RTSP request: %s %s", 
+               rtsp_async_server_cpp::RTSPRequest::methodToString(request.getMethod()).c_str(),
+               request.getUri().c_str());
+  
+  // Return false to let the library handle the request
+  return false;
 }
 
-void RTSPStreamer::handleRTSPRequest(int client_socket)
-{
-  char buffer[4096];
-  while (active_) {
-    ssize_t received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-    if (received <= 0) {
-      break;
-    }
-    
-    buffer[received] = '\0';
-    std::string request(buffer);
-    
-    // Parse RTSP request
-    std::istringstream iss(request);
-    std::string method, uri, version;
-    iss >> method >> uri >> version;
-    
-    RCLCPP_DEBUG(node_->get_logger(), "RTSP %s request for %s", method.c_str(), uri.c_str());
-    
-    if (method == "OPTIONS") {
-      handleOptions(client_socket, uri, request);
-    } else if (method == "DESCRIBE") {
-      handleDescribe(client_socket, uri, request);
-    } else if (method == "SETUP") {
-      // Extract transport from request
-      std::string transport;
-      size_t transport_pos = request.find("Transport:");
-      if (transport_pos != std::string::npos) {
-        size_t line_end = request.find("\r\n", transport_pos);
-        transport = request.substr(transport_pos + 10, line_end - transport_pos - 10);
-        // Trim whitespace
-        transport.erase(0, transport.find_first_not_of(" \t"));
-        transport.erase(transport.find_last_not_of(" \t") + 1);
-      }
-      handleSetup(client_socket, transport, request);
-    } else if (method == "PLAY") {
-      // Extract session from request
-      std::string session;
-      size_t session_pos = request.find("Session:");
-      if (session_pos != std::string::npos) {
-        size_t line_end = request.find("\r\n", session_pos);
-        session = request.substr(session_pos + 8, line_end - session_pos - 8);
-        // Trim whitespace
-        session.erase(0, session.find_first_not_of(" \t"));
-        session.erase(session.find_last_not_of(" \t") + 1);
-      }
-      handlePlay(client_socket, session, request);
-    } else if (method == "TEARDOWN") {
-      // Extract session from request
-      std::string session;
-      size_t session_pos = request.find("Session:");
-      if (session_pos != std::string::npos) {
-        size_t line_end = request.find("\r\n", session_pos);
-        session = request.substr(session_pos + 8, line_end - session_pos - 8);
-        // Trim whitespace
-        session.erase(0, session.find_first_not_of(" \t"));
-        session.erase(session.find_last_not_of(" \t") + 1);
-      }
-      handleTeardown(client_socket, session, request);
-      break;
-    }
-  }
-  
-  close(client_socket);
-}
-
-void RTSPStreamer::handleOptions(int client_socket, const std::string& uri, const std::string& request)
-{
-  // Extract CSeq from request
-  std::string cseq = "1"; // Default value
-  size_t cseq_pos = request.find("CSeq:");
-  if (cseq_pos != std::string::npos) {
-    size_t line_end = request.find("\r\n", cseq_pos);
-    if (line_end != std::string::npos) {
-      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
-      // Trim whitespace
-      cseq.erase(0, cseq.find_first_not_of(" \t"));
-      cseq.erase(cseq.find_last_not_of(" \t") + 1);
-    }
-  }
-  
-  std::stringstream response;
-  response << "RTSP/1.0 200 OK\r\n"
-           << "CSeq: " << cseq << "\r\n"
-           << "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n"
-           << "\r\n";
-
-  send(client_socket, response.str().c_str(), response.str().length(), 0);
-}
-
-void RTSPStreamer::handleDescribe(int client_socket, const std::string& uri, const std::string& request)
-{
-  // Extract CSeq from request
-  std::string cseq = "1"; // Default value
-  size_t cseq_pos = request.find("CSeq:");
-  if (cseq_pos != std::string::npos) {
-    size_t line_end = request.find("\r\n", cseq_pos);
-    if (line_end != std::string::npos) {
-      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
-      // Trim whitespace
-      cseq.erase(0, cseq.find_first_not_of(" \t"));
-      cseq.erase(cseq.find_last_not_of(" \t") + 1);
-    }
-  }
-  
-  std::string sdp = generateSDPDescription();
-  
-  std::stringstream response;
-  response << "RTSP/1.0 200 OK\r\n"
-           << "CSeq: " << cseq << "\r\n"
-           << "Content-Type: application/sdp\r\n"
-           << "Content-Length: " << sdp.length() << "\r\n"
-           << "\r\n"
-           << sdp;
-  
-  send(client_socket, response.str().c_str(), response.str().length(), 0);
-}
-
-void RTSPStreamer::handleSetup(int client_socket, const std::string& transport, const std::string& request)
-{
-  // Extract CSeq from request
-  std::string cseq = "1"; // Default value
-  size_t cseq_pos = request.find("CSeq:");
-  if (cseq_pos != std::string::npos) {
-    size_t line_end = request.find("\r\n", cseq_pos);
-    if (line_end != std::string::npos) {
-      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
-      // Trim whitespace
-      cseq.erase(0, cseq.find_first_not_of(" \t"));
-      cseq.erase(cseq.find_last_not_of(" \t") + 1);
-    }
-  }
-  
-  std::string session_id = generateSessionId();
-  
-  // Parse transport info to get client RTP ports
-  uint16_t client_rtp_port = 0;
-  uint16_t client_rtcp_port = 0;
-  
-  size_t client_port_pos = transport.find("client_port=");
-  if (client_port_pos != std::string::npos) {
-    std::string port_range = transport.substr(client_port_pos + 12);
-    size_t dash_pos = port_range.find('-');
-    if (dash_pos != std::string::npos) {
-      client_rtp_port = std::stoi(port_range.substr(0, dash_pos));
-      client_rtcp_port = std::stoi(port_range.substr(dash_pos + 1));
-    }
-  }
-  
-  // Create client record
-  auto client = std::make_shared<RTSPClient>();
-  client->socket_fd = client_socket;
-  client->session_id = session_id;
-  client->transport_info = transport;
-  client->rtp_port = client_rtp_port;
-  client->rtcp_port = client_rtcp_port;
-  
-  // Get client IP
-  struct sockaddr_in client_addr;
-  socklen_t addr_len = sizeof(client_addr);
-  if (getpeername(client_socket, (struct sockaddr*)&client_addr, &addr_len) == 0) {
-    client->client_ip = inet_ntoa(client_addr.sin_addr);
-  }
-  
-  {
-    std::lock_guard<std::mutex> lock(clients_mutex_);
-    clients_[session_id] = client;
-  }
-  
-  std::stringstream response;
-  response << "RTSP/1.0 200 OK\r\n"
-           << "CSeq: " << cseq << "\r\n"
-           << "Transport: " << transport << ";server_port=" << rtsp_port_ << "-" << (rtsp_port_ + 1) << "\r\n"
-           << "Session: " << session_id << "\r\n"
-           << "\r\n";
-  
-  send(client_socket, response.str().c_str(), response.str().length(), 0);
-}
-
-void RTSPStreamer::handlePlay(int client_socket, const std::string& session, const std::string& request)
-{
-  // Extract CSeq from request
-  std::string cseq = "1"; // Default value
-  size_t cseq_pos = request.find("CSeq:");
-  if (cseq_pos != std::string::npos) {
-    size_t line_end = request.find("\r\n", cseq_pos);
-    if (line_end != std::string::npos) {
-      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
-      // Trim whitespace
-      cseq.erase(0, cseq.find_first_not_of(" \t"));
-      cseq.erase(cseq.find_last_not_of(" \t") + 1);
-    }
-  }
-  
-  std::stringstream response;
-  response << "RTSP/1.0 200 OK\r\n"
-           << "CSeq: " << cseq << "\r\n"
-           << "Session: " << session << "\r\n"
-           << "\r\n";
-  
-  send(client_socket, response.str().c_str(), response.str().length(), 0);
-  
-  streaming_ = true;
-  
-  // Initialize encoder if not already done
-  if (!codec_context_) {
-    initializeEncoder();
-  }
-}
-
-void RTSPStreamer::handleTeardown(int client_socket, const std::string& session, const std::string& request)
-{
-  // Extract CSeq from request
-  std::string cseq = "1"; // Default value
-  size_t cseq_pos = request.find("CSeq:");
-  if (cseq_pos != std::string::npos) {
-    size_t line_end = request.find("\r\n", cseq_pos);
-    if (line_end != std::string::npos) {
-      cseq = request.substr(cseq_pos + 5, line_end - cseq_pos - 5);
-      // Trim whitespace
-      cseq.erase(0, cseq.find_first_not_of(" \t"));
-      cseq.erase(cseq.find_last_not_of(" \t") + 1);
-    }
-  }
-  
-  std::stringstream response;
-  response << "RTSP/1.0 200 OK\r\n"
-           << "CSeq: " << cseq << "\r\n"
-           << "Session: " << session << "\r\n"
-           << "\r\n";
-  
-  send(client_socket, response.str().c_str(), response.str().length(), 0);
-  
-  // Remove client
-  {
-    std::lock_guard<std::mutex> lock(clients_mutex_);
-    clients_.erase(session);
-  }
-  
-  // Stop streaming if no clients
-  if (clients_.empty()) {
-    streaming_ = false;
-  }
-}
-
-void RTSPStreamer::rtpStreamThread()
-{
-  while (active_) {
-    std::unique_lock<std::mutex> lock(frame_mutex_);
-    frame_cv_.wait(lock, [this] { return !frame_queue_.empty() || !active_; });
-    
-    if (!active_) {
-      break;
-    }
-    
-    if (streaming_ && !frame_queue_.empty()) {
-      cv::Mat frame = frame_queue_.front();
-      frame_queue_.pop();
-      lock.unlock();
-      
-      encodeAndSendFrame(frame);
-    }
-  }
-}
-
-void RTSPStreamer::imageCallback(const sensor_msgs::msg::Image::ConstPtr & msg)
+void RTSPStreamer::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg)
 {
   if (!streaming_) {
     return;
   }
-  
+
   cv_bridge::CvImagePtr cv_ptr;
   try {
-    // First try to convert to BGR8
+    // Convert to BGR8
     cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
   } catch (cv_bridge::Exception& e) {
     RCLCPP_ERROR(node_->get_logger(), "cv_bridge exception: %s", e.what());
     return;
   }
-  
+
   cv::Mat frame = cv_ptr->image;
-  
-  // Update dimensions if needed
-  if (frame.cols != width_ || frame.rows != height_) {
-    width_ = frame.cols;
-    height_ = frame.rows;
-    
-    // Reinitialize encoder with new dimensions
-    cleanupEncoder();
-    initializeEncoder();
+
+  // Get media stream
+  auto media_stream = rtsp_server_->getMediaStream(topic_);
+  if (!media_stream) {
+    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                        "Media stream not found for topic: %s", topic_.c_str());
+    return;
   }
-  
-  // Add frame to queue with adaptive queue management
-  {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    
-    // Adaptive queue size based on streaming state
-    const size_t max_queue_size = streaming_ ? 3 : 1;  // Smaller queue for lower latency
-    
-    // Drop older frames if queue is full (maintain low latency)
-    while (frame_queue_.size() >= max_queue_size) {
-      frame_queue_.pop();
+
+  // Update media stream parameters if frame size changed
+  auto h264_stream = std::dynamic_pointer_cast<rtsp_async_server_cpp::H264MediaStream>(media_stream);
+  if (h264_stream) {
+    if (frame.cols != width_ || frame.rows != height_) {
+      width_ = frame.cols;
+      height_ = frame.rows;
+      h264_stream->setVideoParameters(width_, height_, fps_, bitrate_);
     }
-    
-    frame_queue_.push(std::move(frame));  // Use move to avoid copying
+
+    // Process frame data
+    h264_stream->processFrame(frame.data, frame.total() * frame.elemSize(), getTimeStamp());
   }
-  
-  frame_cv_.notify_one();
 }
 
-void RTSPStreamer::encodeAndSendFrame(const cv::Mat & frame)
+uint32_t RTSPStreamer::getTimeStamp()
 {
-  std::lock_guard<std::mutex> lock(encode_mutex_);
-  
-  if (!codec_context_ || !frame_) {
-    return;
-  }
-  
-  // Optimize: Check if we need to convert color space
-  AVFrame* input_frame = nullptr;
-  bool needs_conversion = true;
-  
-  // Check if input is already in the right format (optimization opportunity)
-  if (frame.channels() == 3 && frame.depth() == CV_8U) {
-    input_frame = av_frame_alloc();
-    av_image_fill_arrays(
-      input_frame->data, input_frame->linesize,
-      frame.data, AV_PIX_FMT_BGR24, width_, height_, 1);
-  } else {
-    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000, 
-                        "Unexpected frame format, may impact performance");
-    input_frame = av_frame_alloc();
-    av_image_fill_arrays(
-      input_frame->data, input_frame->linesize,
-      frame.data, AV_PIX_FMT_BGR24, width_, height_, 1);
-  }
-  
-  // Convert color space with optimized scaling algorithm
-  if (!sws_context_) {
-    // Use faster scaling algorithm for real-time streaming
-    sws_context_ = sws_getContext(
-      width_, height_, AV_PIX_FMT_BGR24,
-      width_, height_, AV_PIX_FMT_YUV420P,
-      SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-  }
-  
-  sws_scale(
-    sws_context_,
-    (const uint8_t * const *)input_frame->data, input_frame->linesize,
-    0, height_,
-    frame_->data, frame_->linesize);
-  
-  av_frame_free(&input_frame);
-  
-  // Set frame properties with proper timestamp calculation
-  static uint64_t frame_count = 0;
-  frame_->pts = frame_count++;
-  
-  // Encode frame
-  int ret = avcodec_send_frame(codec_context_, frame_);
-  if (ret < 0) {
-    RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
-                         "Error sending frame to encoder");
-    return;
-  }
-  
-  while (ret >= 0) {
-    ret = avcodec_receive_packet(codec_context_, packet_);
-    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-      break;
-    } else if (ret < 0) {
-      RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
-                          "Error receiving packet from encoder");
-      break;
-    }
-    
-    // Send H.264 NAL units as RTP packets
-    // First, check if we need to send SPS/PPS before the frame
-    if (packet_->flags & AV_PKT_FLAG_KEY) {
-      // This is a keyframe, send SPS/PPS first if available
-      if (codec_context_->extradata && codec_context_->extradata_size > 0) {
-        sendSPSPPS();
-      }
-    }
-    
-    sendH264NALUnit(packet_->data, packet_->size, rtp_timestamp_);
-      
-    // Calculate proper timestamp increment based on framerate
-    rtp_timestamp_ += 90000 / fps_; // 90kHz clock divided by fps
-    
-    av_packet_unref(packet_);
-  }
-}
-
-void RTSPStreamer::sendH264NALUnit(const uint8_t* nal_data, size_t nal_size, uint32_t timestamp) {
-  const size_t max_rtp_payload_size = 1400;  // Typical MTU size minus headers
-
-  if (nal_size <= max_rtp_payload_size) {
-    // Single NAL unit
-    sendRTPPacket(nal_data, nal_size, true, timestamp);
-  } else {
-    // Fragmented NAL unit (FU-A) - optimized for performance
-    uint8_t nal_header = nal_data[0];
-    const uint8_t* nal_payload = nal_data + 1;
-    size_t nal_payload_size = nal_size - 1;
-    
-    // FU-A indicator: F=0, NRI from original NAL, Type=28 (FU-A)
-    uint8_t fu_indicator = (nal_header & 0xE0) | NALU_TYPE_FU_A;
-    
-    // Pre-allocate fragment buffer to avoid repeated allocations
-    static thread_local std::vector<uint8_t> fragment_buffer;
-    fragment_buffer.clear();
-    fragment_buffer.reserve(max_rtp_payload_size);
-    
-    size_t offset = 0;
-    bool first_fragment = true;
-    
-    while (offset < nal_payload_size) {
-      size_t fragment_size = std::min(max_rtp_payload_size - 2, nal_payload_size - offset);  // -2 for FU headers
-      
-      // FU-A header: S, E, R, Type from original NAL
-      uint8_t fu_header = (nal_header & 0x1F);  // NAL unit type
-      
-      if (first_fragment) {
-        fu_header |= 0x80;  // Start bit
-        first_fragment = false;
-      }
-      
-      bool is_last_fragment = (offset + fragment_size >= nal_payload_size);
-      if (is_last_fragment) {
-        fu_header |= 0x40;  // End bit
-      }
-
-      // Efficient buffer construction
-      fragment_buffer.clear();
-      fragment_buffer.push_back(fu_indicator);
-      fragment_buffer.push_back(fu_header);
-      fragment_buffer.insert(fragment_buffer.end(), nal_payload + offset, nal_payload + offset + fragment_size);
-
-      sendRTPPacket(fragment_buffer.data(), fragment_buffer.size(), is_last_fragment, timestamp);
-
-      offset += fragment_size;
-    }
-  }
-}
-
-void RTSPStreamer::sendSPSPPS() {
-  if (!codec_context_ || !codec_context_->extradata || codec_context_->extradata_size == 0) {
-    return;
-  }
-  
-  uint8_t* extradata = codec_context_->extradata;
-  int extradata_size = codec_context_->extradata_size;
-  
-  // H.264 extradata format: [configurationVersion][AVCProfileIndication][profile_compatibility][AVCLevelIndication][lengthSizeMinusOne][numOfSequenceParameterSets]...
-  if (extradata_size >= 8 && extradata[0] == 1) {
-    // Parse SPS
-    int sps_count = extradata[5] & 0x1f;
-    int offset = 6;
-    
-    for (int i = 0; i < sps_count && offset < extradata_size - 2; i++) {
-      int sps_length = (extradata[offset] << 8) | extradata[offset + 1];
-      offset += 2;
-      
-      if (offset + sps_length <= extradata_size) {
-        // Send SPS NAL unit with start code
-        std::vector<uint8_t> sps_nal;
-        sps_nal.push_back(0x00);
-        sps_nal.push_back(0x00);
-        sps_nal.push_back(0x00);
-        sps_nal.push_back(0x01);
-        sps_nal.insert(sps_nal.end(), extradata + offset, extradata + offset + sps_length);
-        
-        sendH264NALUnit(sps_nal.data() + 4, sps_nal.size() - 4, rtp_timestamp_);
-        offset += sps_length;
-        break; // Only use first SPS
-      }
-    }
-    
-    // Parse PPS
-    if (offset < extradata_size) {
-      int pps_count = extradata[offset];
-      offset++;
-      
-      for (int i = 0; i < pps_count && offset < extradata_size - 2; i++) {
-        int pps_length = (extradata[offset] << 8) | extradata[offset + 1];
-        offset += 2;
-        
-        if (offset + pps_length <= extradata_size) {
-          // Send PPS NAL unit with start code
-          std::vector<uint8_t> pps_nal;
-          pps_nal.push_back(0x00);
-          pps_nal.push_back(0x00);
-          pps_nal.push_back(0x00);
-          pps_nal.push_back(0x01);
-          pps_nal.insert(pps_nal.end(), extradata + offset, extradata + offset + pps_length);
-          
-          sendH264NALUnit(pps_nal.data() + 4, pps_nal.size() - 4, rtp_timestamp_);
-          break; // Only use first PPS
-        }
-      }
-    }
-  }
-}
-
-
-void RTSPStreamer::sendRTPPacket(const uint8_t* data, size_t size, bool marker, uint32_t timestamp) {
-  RTSPStreamer::RTPHeader header = createRTPHeader(marker, timestamp);
-
-  // Pre-allocate packet buffer to avoid repeated allocations
-  static thread_local std::vector<uint8_t> packet_buffer;
-  const size_t total_size = sizeof(RTSPStreamer::RTPHeader) + size;
-  packet_buffer.resize(total_size);
-  
-  // Copy header and data in one operation
-  std::memcpy(packet_buffer.data(), &header, sizeof(RTSPStreamer::RTPHeader));
-  std::memcpy(packet_buffer.data() + sizeof(RTSPStreamer::RTPHeader), data, size);
-
-  // Send RTP packet to all clients
-  std::lock_guard<std::mutex> lock(clients_mutex_);
-  for (auto& client_pair : clients_) {
-    auto& client = client_pair.second;
-    if (client->active && client->rtp_port > 0) {
-      // Use pre-computed socket address if available
-      if (client->cached_addr.sin_family == 0) {
-        client->cached_addr.sin_family = AF_INET;
-        client->cached_addr.sin_port = htons(client->rtp_port);
-        inet_pton(AF_INET, client->client_ip.c_str(), &client->cached_addr.sin_addr);
-      }
-
-      // Reuse socket for better performance
-      if (client->rtp_socket_fd < 0) {
-        client->rtp_socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
-        // Enable non-blocking mode for better performance
-        fcntl(client->rtp_socket_fd, F_SETFL, O_NONBLOCK);
-      }
-      
-      if (client->rtp_socket_fd >= 0) {
-        sendto(client->rtp_socket_fd, packet_buffer.data(), total_size, 0,
-               (struct sockaddr*)&client->cached_addr, sizeof(client->cached_addr));
-      }
-    }
-  }
-}
-
-
-RTSPStreamer::RTPHeader RTSPStreamer::createRTPHeader(bool marker, uint32_t timestamp) {
-  RTPHeader header;
-  header.version_padding_extension_csrc_count = (2 << 6);  // Version 2, no padding, no extension
-  header.marker_payload_type = (marker << 7) | 96;  // Marker bit and payload type 96
-  header.sequence_number = htons(rtp_sequence_++);
-  header.timestamp = htonl(timestamp);
-  header.ssrc = htonl(rtp_ssrc_);
-  return header;
-}
-
-
-std::vector<uint8_t> RTSPStreamer::findNALUnits(const uint8_t* data, size_t size) {
-  std::vector<uint8_t> nal_units;
-  size_t start = 0;
-
-  while (start < size) {
-    // Look for the start code
-    size_t end = start;
-    while (end < size - 4) {
-      if (data[end] == 0x00 && data[end + 1] == 0x00 && data[end + 2] == 0x00 && data[end + 3] == 0x01) {
-        break;
-      }
-      end++;
-    }
-    
-    if (end < size - 4) {
-      nal_units.push_back(end);
-      start = end + 4;
-    } else {
-      nal_units.push_back(size);
-      break;
-    }
-  }
-
-  return nal_units;
-}
-
-
-void RTSPStreamer::initializeEncoder()
-{
-  // Find encoder
-  codec_ = avcodec_find_encoder_by_name(codec_name_.c_str());
-  if (!codec_) {
-    RCLCPP_ERROR(node_->get_logger(), "Codec '%s' not found", codec_name_.c_str());
-    return;
-  }
-  
-  // Allocate codec context
-  codec_context_ = avcodec_alloc_context3(codec_);
-  if (!codec_context_) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to allocate codec context");
-    return;
-  }
-  
-  // Set codec parameters optimized for real-time streaming
-  codec_context_->bit_rate = bitrate_;
-  codec_context_->width = width_;
-  codec_context_->height = height_;
-  codec_context_->time_base = {1, fps_};
-  codec_context_->framerate = {fps_, 1};
-  codec_context_->gop_size = fps_;  // GOP size equal to framerate for better seeking
-  codec_context_->max_b_frames = 0;  // Disable B-frames for lower latency
-  codec_context_->pix_fmt = AV_PIX_FMT_YUV420P;
-  
-  // Optimize for low latency streaming
-  codec_context_->flags |= AV_CODEC_FLAG_LOW_DELAY;
-  codec_context_->flags2 |= AV_CODEC_FLAG2_FAST;
-  
-  // Set codec options for real-time streaming
-  if (codec_->id == AV_CODEC_ID_H264) {
-    av_opt_set(codec_context_->priv_data, "preset", "ultrafast", 0);
-    av_opt_set(codec_context_->priv_data, "tune", "zerolatency", 0);
-    av_opt_set(codec_context_->priv_data, "profile", "baseline", 0);
-    av_opt_set(codec_context_->priv_data, "level", "3.1", 0);
-    av_opt_set(codec_context_->priv_data, "crf", "23", 0);  // Constant rate factor for quality
-    av_opt_set(codec_context_->priv_data, "threads", "auto", 0);
-    
-    // Optimize for real-time encoding
-    av_opt_set(codec_context_->priv_data, "rc-lookahead", "0", 0);
-    av_opt_set(codec_context_->priv_data, "sync-lookahead", "0", 0);
-    av_opt_set(codec_context_->priv_data, "sliced-threads", "1", 0);
-  }
-  
-  // Open codec
-  if (avcodec_open2(codec_context_, codec_, nullptr) < 0) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to open codec");
-    avcodec_free_context(&codec_context_);
-    return;
-  }
-  
-  // Allocate frame
-  frame_ = av_frame_alloc();
-  if (!frame_) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to allocate frame");
-    return;
-  }
-  
-  frame_->format = codec_context_->pix_fmt;
-  frame_->width = width_;
-  frame_->height = height_;
-  
-  if (av_frame_get_buffer(frame_, 0) < 0) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to allocate frame buffer");
-    return;
-  }
-  
-  // Allocate packet
-  packet_ = av_packet_alloc();
-  if (!packet_) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to allocate packet");
-    return;
-  }
-  
-  RCLCPP_INFO(node_->get_logger(), "H.264 encoder initialized: %dx%d@%dfps, bitrate=%d", 
-             width_, height_, fps_, bitrate_);
-}
-
-void RTSPStreamer::cleanupEncoder()
-{
-  if (packet_) {
-    av_packet_free(&packet_);
-    packet_ = nullptr;
-  }
-  
-  if (frame_) {
-    av_frame_free(&frame_);
-    frame_ = nullptr;
-  }
-  
-  if (codec_context_) {
-    avcodec_free_context(&codec_context_);
-    codec_context_ = nullptr;
-  }
-  
-  if (sws_context_) {
-    sws_freeContext(sws_context_);
-    sws_context_ = nullptr;
-  }
-}
-
-std::string RTSPStreamer::generateSessionId()
-{
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<> dis(0, 15);
-  
-  std::string session_id;
-  for (int i = 0; i < 8; ++i) {
-    session_id += "0123456789ABCDEF"[dis(gen)];
-  }
-  
-  return session_id;
-}
-
-std::string RTSPStreamer::generateSDPDescription()
-{
-  std::stringstream sdp;
-  
-  // Extract SPS and PPS from codec context if available
-  std::string sps_pps_params;
-  if (codec_context_ && codec_context_->extradata_size > 0) {
-    // Parse extradata to find SPS and PPS
-    uint8_t* extradata = codec_context_->extradata;
-    int extradata_size = codec_context_->extradata_size;
-    
-    // H.264 extradata format: [configurationVersion][AVCProfileIndication][profile_compatibility][AVCLevelIndication][lengthSizeMinusOne][numOfSequenceParameterSets]...
-    if (extradata_size >= 8 && extradata[0] == 1) {
-      // Parse SPS
-      int sps_count = extradata[5] & 0x1f;
-      int offset = 6;
-      
-      for (int i = 0; i < sps_count && offset < extradata_size - 2; i++) {
-        int sps_length = (extradata[offset] << 8) | extradata[offset + 1];
-        offset += 2;
-        
-        if (offset + sps_length <= extradata_size) {
-          // Convert SPS to base64
-          std::string sps_base64;
-          const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-          
-          for (int j = 0; j < sps_length; j += 3) {
-            uint32_t val = 0;
-            for (int k = 0; k < 3 && j + k < sps_length; k++) {
-              val |= (extradata[offset + j + k] << (16 - k * 8));
-            }
-            
-            sps_base64 += chars[(val >> 18) & 0x3f];
-            sps_base64 += chars[(val >> 12) & 0x3f];
-            sps_base64 += (j + 1 < sps_length) ? chars[(val >> 6) & 0x3f] : '=';
-            sps_base64 += (j + 2 < sps_length) ? chars[val & 0x3f] : '=';
-          }
-          
-          if (!sps_pps_params.empty()) sps_pps_params += ",";
-          sps_pps_params += "sprop-parameter-sets=" + sps_base64;
-          offset += sps_length;
-          break; // Only use first SPS
-        }
-      }
-      
-      // Parse PPS
-      if (offset < extradata_size) {
-        int pps_count = extradata[offset];
-        offset++;
-        
-        for (int i = 0; i < pps_count && offset < extradata_size - 2; i++) {
-          int pps_length = (extradata[offset] << 8) | extradata[offset + 1];
-          offset += 2;
-          
-          if (offset + pps_length <= extradata_size) {
-            // Convert PPS to base64
-            std::string pps_base64;
-            const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            
-            for (int j = 0; j < pps_length; j += 3) {
-              uint32_t val = 0;
-              for (int k = 0; k < 3 && j + k < pps_length; k++) {
-                val |= (extradata[offset + j + k] << (16 - k * 8));
-              }
-              
-              pps_base64 += chars[(val >> 18) & 0x3f];
-              pps_base64 += chars[(val >> 12) & 0x3f];
-              pps_base64 += (j + 1 < pps_length) ? chars[(val >> 6) & 0x3f] : '=';
-              pps_base64 += (j + 2 < pps_length) ? chars[val & 0x3f] : '=';
-            }
-            
-            if (!sps_pps_params.empty()) sps_pps_params += ",";
-            else sps_pps_params += "sprop-parameter-sets=";
-            sps_pps_params += pps_base64;
-            break; // Only use first PPS
-          }
-        }
-      }
-    }
-  }
-  
-  // If we couldn't extract SPS/PPS, use default H.264 baseline profile parameters
-  if (sps_pps_params.empty()) {
-    // Default SPS/PPS for H.264 baseline profile (640x480)
-    sps_pps_params = "sprop-parameter-sets=Z0IAH5WoFAFuQA==,aM48gA==";
-  }
-  
-  sdp << "v=0\r\n"
-      << "o=- 0 0 IN IP4 127.0.0.1\r\n"
-      << "s=ROS Video Stream\r\n"
-      << "c=IN IP4 0.0.0.0\r\n"
-      << "t=0 0\r\n"
-      << "a=tool:web_video_server\r\n"
-      << "m=video 0 RTP/AVP 96\r\n"
-      << "a=rtpmap:96 H264/90000\r\n"
-      << "a=fmtp:96 packetization-mode=1;" << sps_pps_params << "\r\n"
-      << "a=control:*\r\n";
-  
-  return sdp.str();
+  auto now = std::chrono::steady_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time_);
+  return static_cast<uint32_t>(duration.count() * 90); // Convert to 90kHz clock
 }
 
 // RTSPStreamerManager implementation
@@ -1152,7 +315,7 @@ std::shared_ptr<RTSPStreamer> RTSPStreamerManager::createStreamer(
     rtsp_port = next_port_++;
   }
   
-  // Always create a new independent streamer - no more topic switching
+  // Create new streamer
   RCLCPP_INFO(node_->get_logger(), "Creating new RTSP stream for %s on port %d", stream_key.c_str(), rtsp_port);
   auto streamer = std::make_shared<RTSPStreamer>(node_, topic, codec, rtsp_port);
   streamers_[stream_key] = streamer;
@@ -1227,7 +390,5 @@ void RTSPStreamerManager::cleanupInactiveStreamers()
     }
   }
 }
-
-// PointCloud2SubscriberType is defined in the header file
 
 }  // namespace web_video_server

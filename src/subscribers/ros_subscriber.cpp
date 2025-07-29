@@ -40,7 +40,7 @@ void RosSubscriber::subscribe(const async_web_server_cpp::HttpRequest &request,
 }
 
 
-void RosSubscriber::subscriberCallback(const sensor_msgs::msg::Image::ConstPtr &input_msg)
+void RosSubscriber::subscriberCallback(const sensor_msgs::msg::Image::ConstSharedPtr &input_msg)
 {
   callback_(input_msg);
 }

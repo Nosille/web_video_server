@@ -132,7 +132,7 @@ void RosCompressedStreamer::sendCompressedImage(
 
 
 void RosCompressedStreamer::compressedImageCallback(
-  const sensor_msgs::msg::CompressedImage::ConstPtr msg)
+  const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg)
 {
   std::scoped_lock lock(send_mutex_);  // protects last_msg and last_frame
   last_msg = msg;
