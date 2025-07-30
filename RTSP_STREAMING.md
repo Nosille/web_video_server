@@ -1,7 +1,14 @@
 # RTSP Streaming Documentation
 
 ## Overview
-The web_video_server has been updated to provide RTSP streaming functionality that mirrors the HTTP streaming API. The RTSP functionality follows the same URL pattern and query parameter structure as the HTTP streaming.
+The web_video_server provides GStreamer-based RTSP streaming functionality with dynamic ROS topic discovery integration. The RTSP streaming works seamlessly with the ROS 2 ecosystem, automatically discovering available camera topics and creating on-demand H.264/VP8/VP9 video streams.
+
+## Key Features
+- **Dynamic Topic Discovery**: Automatically discovers ROS camera topics via `sensor_msgs/Image` and `sensor_msgs/CompressedImage`
+- **On-Demand Stream Creation**: RTSP streams created only when requested
+- **Multiple Codec Support**: H.264, VP8, VP9 encoding via GStreamer
+- **JSON API Integration**: RESTful HTTP API for stream management
+- **Automatic Cleanup**: Inactive streams are automatically cleaned up
 
 ## Changes Made
 
@@ -115,14 +122,74 @@ vlc rtsp://localhost:8554/stream?topic=/image_raw&type=h264
 4. **Authentication**: Add RTSP authentication support
 5. **Stream Discovery**: Automatic stream discovery for available topics
 
+## Integration with Dynamic Discovery Systems
+
+### ROS Topic Manager Integration
+The RTSP streaming works seamlessly with dynamic topic discovery systems:
+
+```bash
+# 1. ROS system discovers available camera topics
+ros2 topic list | grep -E "(image|camera)"
+
+# 2. Client applications query available topics via RosTopicManager
+# 3. RTSP streams created on-demand for selected topics
+curl "http://localhost:8080/rtsp_stream?topic=/discovered_camera_topic&type=h264"
+
+# 4. JSON response provides actual RTSP URL
+{"rtsp_url": "rtsp://localhost:8554/_discovered_camera_topic"}
+```
+
+### Android Client Integration
+For Android applications (like ATAK plugins), use the following pattern:
+
+```java
+// 1. Create RTSP stream via HTTP POST
+String httpUrl = "http://" + host + ":8080/rtsp_stream?topic=" + topic + "&type=h264";
+Request request = new Request.Builder().url(httpUrl).build();
+
+// 2. Parse JSON response to get RTSP URL
+JSONObject response = new JSONObject(responseBody);
+String rtspUrl = response.getString("rtsp_url");
+
+// 3. Connect to RTSP stream
+cameraStreamManager.playRTSPStreamWithFallback(videoView, rtspUrl, "");
+```
+
 ## Architecture
 
-The RTSP streaming functionality is built on top of the existing HTTP streaming architecture:
+The RTSP streaming functionality uses GStreamer and is built on top of the existing HTTP streaming architecture:
 
-1. **RTSPStreamerManager**: Manages multiple RTSP streams
-2. **RTSPStreamer**: Individual stream handler for each topic
-3. **HTTP Endpoint**: `/rtsp_stream` endpoint for creating streams
-4. **RTSP Protocol**: Custom RTSP server implementation
-5. **RTP Streaming**: UDP-based RTP packet transmission
+### Core Components
+1. **GstRTSPStreamerManager**: Manages multiple GStreamer RTSP streams
+2. **GstRTSPStreamer**: Individual GStreamer pipeline for each topic
+3. **HTTP Endpoint**: `/rtsp_stream` endpoint for creating streams via REST API
+4. **GStreamer Pipeline**: `appsrc → videoconvert → x264enc → rtph264pay → RTSP`
+5. **RTSP Server**: GStreamer's native RTSP server implementation
 
-This design ensures consistency with the existing HTTP streaming while providing the benefits of RTSP protocol for real-time video streaming.
+### Stream Lifecycle
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant H as HTTP API
+    participant M as StreamManager
+    participant G as GStreamer
+    participant R as ROS Topic
+    
+    C->>H: POST /rtsp_stream?topic=/camera&type=h264
+    H->>M: createStreamer(topic, codec)
+    M->>G: Create GStreamer pipeline
+    G->>G: Setup RTSP server on port
+    M->>R: Subscribe to ROS topic
+    G-->>H: RTSP URL
+    H-->>C: JSON: {"rtsp_url": "rtsp://host:port/path"}
+    C->>G: Connect RTSP client
+    R->>G: Image data
+    G->>C: H.264 RTP stream
+```
+
+### URL Format and Topic Sanitization
+- **Input topic**: `/arena_camera/image_raw`
+- **Sanitized path**: `_arena_camera_image_raw` (replaces `/` with `_`)
+- **RTSP URL**: `rtsp://localhost:8554/_arena_camera_image_raw`
+
+This design ensures consistency with the existing HTTP streaming while providing the benefits of RTSP protocol for real-time video streaming with full GStreamer integration.

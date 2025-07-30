@@ -8,7 +8,6 @@ endif()
 find_package(ament_cmake_ros REQUIRED)
 
 find_package(async_web_server_cpp REQUIRED)
-find_package(rtsp_async_server_cpp REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -29,6 +28,9 @@ pkg_check_modules(avcodec libavcodec REQUIRED)
 pkg_check_modules(avformat libavformat REQUIRED)
 pkg_check_modules(avutil libavutil REQUIRED)
 pkg_check_modules(swscale libswscale REQUIRED)
+pkg_check_modules(gstreamer REQUIRED gstreamer-1.0)
+pkg_check_modules(gstreamer-rtsp-server REQUIRED gstreamer-rtsp-server-1.0)
+pkg_check_modules(gstreamer-app REQUIRED gstreamer-app-1.0)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 14)
@@ -52,6 +54,9 @@ include_directories(include
   ${avformat_INCLUDE_DIRS}
   ${avutil_INCLUDE_DIRS}
   ${swscale_INCLUDE_DIRS}
+  ${gstreamer_INCLUDE_DIRS}
+  ${gstreamer-rtsp-server_INCLUDE_DIRS}
+  ${gstreamer-app_INCLUDE_DIRS}
 )
 
 ## Declare a cpp library
@@ -74,7 +79,7 @@ add_library(${PROJECT_NAME} SHARED
   src/subscribers/image_transport_subscriber.cpp
 )
 
-ament_target_dependencies(${PROJECT_NAME} rclcpp tf2 tf2_ros tf2_sensor_msgs tf2_geometry_msgs rtsp_async_server_cpp)
+ament_target_dependencies(${PROJECT_NAME} rclcpp tf2 tf2_ros tf2_sensor_msgs tf2_geometry_msgs)
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(${PROJECT_NAME}
@@ -91,6 +96,9 @@ target_link_libraries(${PROJECT_NAME}
   ${avformat_LIBRARIES}
   ${avutil_LIBRARIES}
   ${swscale_LIBRARIES}
+  ${gstreamer_LIBRARIES}
+  ${gstreamer-rtsp-server_LIBRARIES}
+  ${gstreamer-app_LIBRARIES}
   Threads::Threads
 )
 

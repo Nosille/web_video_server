@@ -395,7 +395,10 @@ bool WebVideoServer::handle_list_streams(
             connection->write(" (<a href=\"rtsp://localhost:");
             connection->write(std::to_string(rtsp_port_));
             connection->write("/");
-            connection->write(*image_topic_itr);
+            // Sanitize topic name for RTSP path - replace slashes with underscores
+            std::string sanitized_topic = *image_topic_itr;
+            std::replace(sanitized_topic.begin(), sanitized_topic.end(), '/', '_');
+            connection->write(sanitized_topic);
             connection->write("\">RTSP Stream</a>)");
           }
           connection->write("</li>");
@@ -430,7 +433,10 @@ bool WebVideoServer::handle_list_streams(
       connection->write(" (<a href=\"rtsp://localhost:");
       connection->write(std::to_string(rtsp_port_));
       connection->write("/");
-      connection->write(*image_topic_itr);
+      // Sanitize topic name for RTSP path - replace slashes with underscores
+      std::string sanitized_topic = *image_topic_itr;
+      std::replace(sanitized_topic.begin(), sanitized_topic.end(), '/', '_');
+      connection->write(sanitized_topic);
       connection->write("\">RTSP Stream</a>)");
     }
     connection->write("</li>");
@@ -510,9 +516,9 @@ bool WebVideoServer::handle_rtsp_stream(
   // Start the streamer
   streamer->start();
 
-  // Return JSON response with stream URL using the streamer port
+  // Return JSON response with the actual RTSP URL from the streamer
   std::stringstream json_response;
-  json_response << "{\"rtsp_url\":\"rtsp://localhost:" << streamer->getPort() << "/stream?topic=" << topic << "&type=" << type << "\"}";
+  json_response << "{\"rtsp_url\":\"" << streamer->getStreamUrl() << "\"}";
 
   async_web_server_cpp::HttpReply::builder(async_web_server_cpp::HttpReply::ok)
   .header("Connection", "close")
@@ -566,7 +572,7 @@ void WebVideoServer::initializeHttpServer() {
 
 void WebVideoServer::initializeRtspServer() {
   if (rtsp_enabled_) {
-    rtsp_manager_ = std::make_shared<RTSPStreamerManager>(shared_from_this());
+    rtsp_manager_ = std::make_shared<GstRTSPStreamerManager>(shared_from_this());
     RCLCPP_INFO(get_logger(), "RTSP streaming enabled on %s:%d", rtsp_address_.c_str(), rtsp_port_);
   }
 }

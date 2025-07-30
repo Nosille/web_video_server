@@ -129,7 +129,24 @@ void ImageStreamer::restreamFrame(std::chrono::duration<double> max_age)
 cv::Mat ImageStreamer::decodeImage(
   const sensor_msgs::msg::Image::ConstSharedPtr & msg)
 {
-  if (sensor_msgs::image_encodings::isColor(msg->encoding)) {
+  // Handle Bayer patterns (raw sensor data)
+  if (msg->encoding == sensor_msgs::image_encodings::BAYER_RGGB8 || 
+      msg->encoding == sensor_msgs::image_encodings::BAYER_BGGR8 || 
+      msg->encoding == sensor_msgs::image_encodings::BAYER_GBRG8 || 
+      msg->encoding == sensor_msgs::image_encodings::BAYER_GRBG8) {
+    RCLCPP_DEBUG(node_->get_logger(), "Bayer 8-bit pattern: %s", msg->encoding.c_str());
+    return cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8)->image;
+  }
+  // Handle 16-bit Bayer patterns
+  else if (msg->encoding == sensor_msgs::image_encodings::BAYER_RGGB16 || 
+           msg->encoding == sensor_msgs::image_encodings::BAYER_BGGR16 || 
+           msg->encoding == sensor_msgs::image_encodings::BAYER_GBRG16 || 
+           msg->encoding == sensor_msgs::image_encodings::BAYER_GRBG16) {
+    RCLCPP_DEBUG(node_->get_logger(), "Bayer 16-bit pattern: %s", msg->encoding.c_str());
+    return cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8)->image;
+  }
+  // Handle standard color formats
+  else if (sensor_msgs::image_encodings::isColor(msg->encoding)) {
     if(sensor_msgs::image_encodings::bitDepth(msg->encoding) == 16)
     {
       RCLCPP_DEBUG(node_->get_logger(), "16 bit color");
@@ -140,7 +157,20 @@ cv::Mat ImageStreamer::decodeImage(
       RCLCPP_DEBUG(node_->get_logger(), "8 bit color");
       return cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8)->image;
     }
-  } else if (msg->encoding.find("F") != std::string::npos) {
+  }
+  // Handle mono/grayscale formats
+  else if (msg->encoding == sensor_msgs::image_encodings::MONO8 || 
+           msg->encoding == sensor_msgs::image_encodings::MONO16) {
+    RCLCPP_DEBUG(node_->get_logger(), "Mono format: %s", msg->encoding.c_str());
+    return cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8)->image;
+  }
+  // Handle YUV formats
+  else if (msg->encoding == sensor_msgs::image_encodings::YUV422) {
+    RCLCPP_DEBUG(node_->get_logger(), "YUV422 format");
+    return cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8)->image;
+  }
+  // Handle floating point images
+  else if (msg->encoding.find("F") != std::string::npos) {
     // scale floating point images
     cv::Mat float_image_bridge = cv_bridge::toCvCopy(msg, msg->encoding)->image;
     cv::Mat_<float> float_image = float_image_bridge;
@@ -151,11 +181,13 @@ cv::Mat ImageStreamer::decodeImage(
       float_image *= (255 / max_val);
     }
     return float_image;
-  } else {
-    // Convert to OpenCV native BGR color
+  }
+  // Unsupported format - report error and don't attempt conversion
+  else {
     auto & clk = *node_->get_clock();
-    RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "unknown data type will try to convert to bgr8");    
-    return cv_bridge::toCvCopy(msg, "bgr8")->image;
+    RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "Unsupported image encoding: %s. Cannot convert to BGR.", msg->encoding.c_str());
+    // Return empty image to avoid crash
+    return cv::Mat();
   }
 }
 
@@ -168,6 +200,12 @@ void ImageStreamer::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr 
   cv::Mat img;
   try {
     img = decodeImage(msg);
+
+    // Check if image decoding failed
+    if (img.empty()) {
+      RCLCPP_WARN(node_->get_logger(), "Failed to decode image with encoding: %s", msg->encoding.c_str());
+      return;
+    }
 
     int input_width = img.cols;
     int input_height = img.rows;

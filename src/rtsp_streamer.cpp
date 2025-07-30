@@ -1,394 +1,345 @@
-// Copyright (c) 2024, The Robot Web Tools Contributors
-// All rights reserved.
-//
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are met:
-//
-//    * Redistributions of source code must retain the above copyright
-//      notice, this list of conditions and the following disclaimer.
-//
-//    * Redistributions in binary form must reproduce the above copyright
-//      notice, this list of conditions and the following disclaimer in the
-//      documentation and/or materials provided with the distribution.
-//
-//    * Neither the name of the copyright holder nor the names of its
-//      contributors may be used to endorse or promote products derived from
-//      this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-// POSSIBILITY OF SUCH DAMAGE.
-
 #include "web_video_server/rtsp_streamer.hpp"
-
-#include "rtsp_async_server_cpp/rtsp_server.hpp"
-#include "rtsp_async_server_cpp/media_stream.hpp"
-#include "async_web_server_cpp/http_request.hpp"
-#include <boost/bind.hpp>
+#ifdef CV_BRIDGE_USES_OLD_HEADERS
+#include <cv_bridge/cv_bridge.h>
+#else
 #include <cv_bridge/cv_bridge.hpp>
+#endif
 #include <sensor_msgs/image_encodings.hpp>
-
-using namespace std::chrono_literals;
+#include <gst/app/gstappsrc.h>
+#include "async_web_server_cpp/http_request.hpp"
+#include <algorithm>
 
 namespace web_video_server
 {
 
-RTSPStreamer::RTSPStreamer(
-  rclcpp::Node::SharedPtr node,
-  const std::string& topic,
-  const std::string& codec_name,
-  int rtsp_port)
+GstRTSPStreamer::GstRTSPStreamer(
+    rclcpp::Node::SharedPtr node,
+    const std::string & topic,
+    const std::string & codec_name,
+    int rtsp_port)
 : node_(node),
   topic_(topic),
   codec_name_(codec_name),
   rtsp_port_(rtsp_port),
-  active_(false),
-  streaming_(false),
-  width_(640),
-  height_(480),
-  fps_(30),
-  bitrate_(1000000)
+  active_(false)
 {
-  // Initialize subscriber types
-  subscriber_types_["image"] = std::make_shared<ImageTransportSubscriberType>();
-  subscriber_types_["pointcloud2"] = std::make_shared<PointCloud2SubscriberType>();
-
-  start_time_ = std::chrono::steady_clock::now();
-
-  // Create RTSP server and media stream
-  try {
-    rtsp_server_ = std::make_shared<rtsp_async_server_cpp::RTSPServer>(
-      "0.0.0.0", std::to_string(rtsp_port),
-      boost::bind(&RTSPStreamer::handleRTSPRequest, this, _1, _2),
-      2);
-
-    // Create H264 media stream
-    auto media_stream = std::make_shared<rtsp_async_server_cpp::H264MediaStream>(
-      topic_, width_, height_, fps_, bitrate_);
-    rtsp_server_->addMediaStream(topic_, media_stream);
-  } catch (const std::exception& e) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to create RTSP server: %s", e.what());
-  }
+    gst_init(NULL, NULL);
+    subscriber_types_["image"] = std::make_shared<ImageTransportSubscriberType>();
 }
 
-RTSPStreamer::~RTSPStreamer()
+GstRTSPStreamer::~GstRTSPStreamer()
 {
-  stop();
+    stop();
 }
 
-void RTSPStreamer::start()
+void GstRTSPStreamer::start()
 {
-  if (active_) {
-    return;
-  }
-
-  RCLCPP_INFO(node_->get_logger(), "Starting RTSP stream for topic: %s", topic_.c_str());
-
-  // Start the RTSP server in a separate thread
-  std::thread([this]() {
-    try {
-      rtsp_server_->run();
-    } catch (const std::exception& e) {
-      RCLCPP_ERROR(node_->get_logger(), "RTSP server error: %s", e.what());
+    if (active_)
+    {
+        return;
     }
-  }).detach();
 
-  // Subscribe to ROS topic
-  std::string subscriber_type = "image";  // Default to image
+    main_loop_ = g_main_loop_new(NULL, FALSE);
+    rtsp_server_ = gst_rtsp_server_new();
+    g_object_set(rtsp_server_, "service", std::to_string(rtsp_port_).c_str(), NULL);
 
-  // Try to determine subscriber type based on topic
-  auto tnat = node_->get_topic_names_and_types();
-  for (const auto& topic_and_types : tnat) {
-    if (topic_and_types.first == topic_) {
-      if (!topic_and_types.second.empty()) {
-        const std::string& topic_type = topic_and_types.second[0];
-        if (topic_type == "sensor_msgs/msg/PointCloud2") {
-          subscriber_type = "pointcloud2";
-        }
-      }
-      break;
-    }
-  }
+    GstRTSPMountPoints *mounts = gst_rtsp_server_get_mount_points(rtsp_server_);
 
-  if (subscriber_types_.find(subscriber_type) != subscriber_types_.end()) {
-    subscriber_ = subscriber_types_[subscriber_type]->create_subscriber(node_);
-
-    // Create a dummy HTTP request for subscriber configuration
-    async_web_server_cpp::HttpRequest dummy_request;
-    dummy_request.query = "qos_profile=default";
-
-    subscriber_->subscribe(
-      dummy_request,
-      topic_,
-      std::bind(&RTSPStreamer::imageCallback, this, std::placeholders::_1)
-    );
-  }
-
-  RCLCPP_INFO(node_->get_logger(), "RTSP stream started on port %d for topic %s", rtsp_port_, topic_.c_str());
-
-  active_ = true;
-  streaming_ = true;
-}
-
-void RTSPStreamer::switchTopic(const std::string& new_topic)
-{
-  if (topic_ == new_topic) {
-    return; // No change needed
-  }
-  
-  RCLCPP_INFO(node_->get_logger(), "Switching RTSP stream from topic %s to %s", topic_.c_str(), new_topic.c_str());
-  
-  // Update topic
-  topic_ = new_topic;
-  
-  // Reset subscriber
-  subscriber_.reset();
-  
-  // Create new media stream for the new topic
-  auto media_stream = std::make_shared<rtsp_async_server_cpp::H264MediaStream>(
-    topic_, width_, height_, fps_, bitrate_);
-  rtsp_server_->removeMediaStream(topic_);
-  rtsp_server_->addMediaStream(topic_, media_stream);
-  
-  // Determine new subscriber type
-  std::string subscriber_type = "image";  // Default to image
-  
-  // Try to determine subscriber type based on topic
-  auto tnat = node_->get_topic_names_and_types();
-  for (const auto& topic_and_types : tnat) {
-    if (topic_and_types.first == topic_) {
-      if (!topic_and_types.second.empty()) {
-        const std::string& topic_type = topic_and_types.second[0];
-        if (topic_type == "sensor_msgs/msg/PointCloud2") {
-          subscriber_type = "pointcloud2";
-        }
-      }
-      break;
-    }
-  }
-  
-  // Create new subscriber for the new topic
-  if (subscriber_types_.find(subscriber_type) != subscriber_types_.end()) {
-    subscriber_ = subscriber_types_[subscriber_type]->create_subscriber(node_);
+    // Use appsrc to feed ROS camera data into the RTSP stream
+    // Simplified pipeline with static configuration
+    std::string pipeline_str = "( appsrc name=mysrc is-live=true do-timestamp=true ! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 ! rtph264pay name=pay0 pt=96 )";
+    GstRTSPMediaFactory *factory = gst_rtsp_media_factory_new();
+    gst_rtsp_media_factory_set_launch(factory, pipeline_str.c_str());
+    gst_rtsp_media_factory_set_shared(factory, TRUE);
     
-    // Create a dummy HTTP request for subscriber configuration
-    async_web_server_cpp::HttpRequest dummy_request;
-    dummy_request.query = "qos_profile=default";
+    // Set up media configure callback to access appsrc element
+    g_signal_connect(factory, "media-configure", G_CALLBACK(+[](GstRTSPMediaFactory *factory, GstRTSPMedia *media, gpointer user_data) {
+        GstRTSPStreamer *self = static_cast<GstRTSPStreamer*>(user_data);
+        GstElement *element = gst_rtsp_media_get_element(media);
+        self->appsrc_ = gst_bin_get_by_name(GST_BIN(element), "mysrc");
+        
+        if (self->appsrc_) {
+            // Set appsrc properties for live streaming
+            g_object_set(self->appsrc_, 
+                "is-live", TRUE,
+                "format", GST_FORMAT_TIME,
+                "block", FALSE,  // Don't block to avoid flow issues
+                "max-buffers", 1,  // Keep only 1 buffer to minimize latency
+                NULL);
+            // Caps will be set dynamically when first image arrives
+        }
+    }), this);
     
-    subscriber_->subscribe(
-      dummy_request,
-      topic_,
-      std::bind(&RTSPStreamer::imageCallback, this, std::placeholders::_1)
-    );
-  }
-  
-  RCLCPP_INFO(node_->get_logger(), "RTSP stream switched to topic %s", topic_.c_str());
-}
+    // Track client connections to know when to push buffers
+    g_signal_connect(factory, "media-constructed", G_CALLBACK(+[](GstRTSPMediaFactory *factory, GstRTSPMedia *media, gpointer user_data) {
+        GstRTSPStreamer *self = static_cast<GstRTSPStreamer*>(user_data);
+        g_signal_connect(media, "new-stream", G_CALLBACK(+[](GstRTSPMedia *media, GstRTSPStream *stream, gpointer user_data) {
+            GstRTSPStreamer *self = static_cast<GstRTSPStreamer*>(user_data);
+            self->has_clients_ = true;
+        }), self);
+        g_signal_connect(media, "removed-stream", G_CALLBACK(+[](GstRTSPMedia *media, GstRTSPStream *stream, gpointer user_data) {
+            GstRTSPStreamer *self = static_cast<GstRTSPStreamer*>(user_data);
+            self->has_clients_ = false;
+        }), self);
+    }), this);
 
-void RTSPStreamer::stop()
-{
-  if (!active_) {
-    return;
-  }
+    // Sanitize topic name for use as stream path - replace slashes with underscores
+    std::string sanitized_topic = topic_;
+    std::replace(sanitized_topic.begin(), sanitized_topic.end(), '/', '_');
+    std::string stream_path = "/" + sanitized_topic;
+    gst_rtsp_mount_points_add_factory(mounts, stream_path.c_str(), factory);
+    g_object_unref(mounts);
 
-  RCLCPP_INFO(node_->get_logger(), "Stopping RTSP stream for topic: %s", topic_.c_str());
+    server_id_ = gst_rtsp_server_attach(rtsp_server_, NULL);
 
-  active_ = false;
-  streaming_ = false;
+    gst_thread_ = std::thread([this]() {
+        g_main_loop_run(main_loop_);
+    });
 
-  // Stop the RTSP server
-  if (rtsp_server_) {
-    rtsp_server_->stop();
-  }
-
-  // Reset subscriber
-  subscriber_.reset();
-}
-
-std::string RTSPStreamer::getStreamUrl() const
-{
-  return "rtsp://localhost:" + std::to_string(rtsp_port_) + "/" + topic_;
-}
-
-bool RTSPStreamer::handleRTSPRequest(
-  const rtsp_async_server_cpp::RTSPRequest& request,
-  std::shared_ptr<rtsp_async_server_cpp::RTSPConnection> connection)
-{
-  // The rtsp_async_server_cpp library handles RTSP requests internally
-  // This is just a placeholder for custom request handling if needed
-  RCLCPP_DEBUG(node_->get_logger(), "RTSP request: %s %s", 
-               rtsp_async_server_cpp::RTSPRequest::methodToString(request.getMethod()).c_str(),
-               request.getUri().c_str());
-  
-  // Return false to let the library handle the request
-  return false;
-}
-
-void RTSPStreamer::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg)
-{
-  if (!streaming_) {
-    return;
-  }
-
-  cv_bridge::CvImagePtr cv_ptr;
-  try {
-    // Convert to BGR8
-    cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-  } catch (cv_bridge::Exception& e) {
-    RCLCPP_ERROR(node_->get_logger(), "cv_bridge exception: %s", e.what());
-    return;
-  }
-
-  cv::Mat frame = cv_ptr->image;
-
-  // Get media stream
-  auto media_stream = rtsp_server_->getMediaStream(topic_);
-  if (!media_stream) {
-    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
-                        "Media stream not found for topic: %s", topic_.c_str());
-    return;
-  }
-
-  // Update media stream parameters if frame size changed
-  auto h264_stream = std::dynamic_pointer_cast<rtsp_async_server_cpp::H264MediaStream>(media_stream);
-  if (h264_stream) {
-    if (frame.cols != width_ || frame.rows != height_) {
-      width_ = frame.cols;
-      height_ = frame.rows;
-      h264_stream->setVideoParameters(width_, height_, fps_, bitrate_);
+    std::string subscriber_type = "image";
+    if (subscriber_types_.find(subscriber_type) != subscriber_types_.end()) {
+        subscriber_ = subscriber_types_[subscriber_type]->create_subscriber(node_);
+        async_web_server_cpp::HttpRequest dummy_request;
+        dummy_request.query = "qos_profile=default";
+        subscriber_->subscribe(
+            dummy_request,
+            topic_,
+            std::bind(&GstRTSPStreamer::imageCallback, this, std::placeholders::_1)
+        );
     }
 
-    // Process frame data
-    h264_stream->processFrame(frame.data, frame.total() * frame.elemSize(), getTimeStamp());
-  }
+    active_ = true;
 }
 
-uint32_t RTSPStreamer::getTimeStamp()
+void GstRTSPStreamer::stop()
 {
-  auto now = std::chrono::steady_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time_);
-  return static_cast<uint32_t>(duration.count() * 90); // Convert to 90kHz clock
+    if (!active_)
+    {
+        return;
+    }
+
+    if (main_loop_)
+    {
+        g_main_loop_quit(main_loop_);
+        if (gst_thread_.joinable())
+        {
+            gst_thread_.join();
+        }
+        g_main_loop_unref(main_loop_);
+        main_loop_ = nullptr;
+    }
+
+    if (rtsp_server_)
+    {
+        g_source_remove(server_id_);
+        g_object_unref(rtsp_server_);
+        rtsp_server_ = nullptr;
+    }
+
+    subscriber_.reset();
+    active_ = false;
 }
 
-// RTSPStreamerManager implementation
+std::string GstRTSPStreamer::getStreamUrl() const
+{
+    // Sanitize topic name for RTSP path - replace slashes with underscores
+    std::string sanitized_topic = topic_;
+    std::replace(sanitized_topic.begin(), sanitized_topic.end(), '/', '_');
+    return "rtsp://localhost:" + std::to_string(rtsp_port_) + "/" + sanitized_topic;
+}
 
-RTSPStreamerManager::RTSPStreamerManager(rclcpp::Node::SharedPtr node)
+void GstRTSPStreamer::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg)
+{
+    if (!active_ || !appsrc_)
+    {
+        return;
+    }
+    
+    // Temporarily allow all buffer pushing for debugging
+    // TODO: Re-enable client connection checking once pipeline is stable
+
+cv_bridge::CvImagePtr cv_ptr;
+    try
+    {
+        // Handle Bayer patterns
+        if (msg->encoding == sensor_msgs::image_encodings::BAYER_RGGB8 || 
+            msg->encoding == sensor_msgs::image_encodings::BAYER_BGGR8 || 
+            msg->encoding == sensor_msgs::image_encodings::BAYER_GBRG8 || 
+            msg->encoding == sensor_msgs::image_encodings::BAYER_GRBG8) {
+            cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+        }
+        // Handle color formats
+        else if (msg->encoding == sensor_msgs::image_encodings::RGB8) {
+            cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+        } 
+        else if (msg->encoding == sensor_msgs::image_encodings::RGBA8) {
+            cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGRA8);
+        } 
+        else if (msg->encoding == sensor_msgs::image_encodings::YUV422) {
+            cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+        }
+        // Handle mono formats
+        else if (msg->encoding == sensor_msgs::image_encodings::MONO8 || msg->encoding == sensor_msgs::image_encodings::MONO16) {
+            cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+        }
+        // Unsupported format
+        else {
+            RCLCPP_ERROR(node_->get_logger(), "Unsupported image encoding: %s", msg->encoding.c_str());
+            return;
+        }
+    } catch (cv_bridge::Exception& e)
+    {
+        RCLCPP_ERROR(node_->get_logger(), "cv_bridge exception: %s", e.what());
+        return;
+    }
+
+    int width = cv_ptr->image.cols;
+    int height = cv_ptr->image.rows;
+    int channels = cv_ptr->image.channels();
+    int size = width * height * channels;
+
+    // Convert to BGR if we have BGRA (4 channels)
+    if (channels == 4) {
+        cv::cvtColor(cv_ptr->image, cv_ptr->image, cv::COLOR_BGRA2BGR);
+        channels = 3;
+        size = width * height * channels;
+    }
+
+    // Set caps dynamically based on first image
+    if (!caps_set_) {
+        GstCaps *caps = gst_caps_new_simple("video/x-raw",
+            "format", G_TYPE_STRING, "BGR",
+            "width", G_TYPE_INT, width,
+            "height", G_TYPE_INT, height,
+            "framerate", GST_TYPE_FRACTION, 30, 1,
+            NULL);
+        g_object_set(appsrc_, "caps", caps, NULL);
+        gst_caps_unref(caps);
+        caps_set_ = true;
+        RCLCPP_INFO(node_->get_logger(), "RTSP stream caps set: %dx%d BGR from encoding %s", width, height, msg->encoding.c_str());
+    }
+
+    GstBuffer *buffer = gst_buffer_new_allocate(NULL, size, NULL);
+    GstMapInfo map;
+    gst_buffer_map(buffer, &map, GST_MAP_WRITE);
+    memcpy(map.data, cv_ptr->image.data, size);
+    gst_buffer_unmap(buffer, &map);
+
+    GST_BUFFER_PTS(buffer) = frame_count_ * gst_util_uint64_scale_int(1, GST_SECOND, 30);
+    GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale_int(1, GST_SECOND, 30); // 30 fps
+    frame_count_++;
+
+    GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(appsrc_), buffer);
+    if (ret != GST_FLOW_OK)
+    {
+        // Don't log here, it's too noisy
+    }
+}
+
+GstRTSPStreamerManager::GstRTSPStreamerManager(rclcpp::Node::SharedPtr node)
 : node_(node), next_port_(8554)
 {
-  // Start cleanup timer
-  cleanup_timer_ = node_->create_wall_timer(
-    5s, std::bind(&RTSPStreamerManager::cleanupInactiveStreamers, this));
+    cleanup_timer_ = node_->create_wall_timer(
+        std::chrono::seconds(5),
+        std::bind(&GstRTSPStreamerManager::cleanupInactiveStreamers, this));
 }
 
-RTSPStreamerManager::~RTSPStreamerManager()
+GstRTSPStreamerManager::~GstRTSPStreamerManager()
 {
-  cleanup();
+    cleanup();
 }
 
-std::shared_ptr<RTSPStreamer> RTSPStreamerManager::createStreamer(
-  const std::string & topic,
-  const std::string & codec,
-  int rtsp_port)
+std::shared_ptr<GstRTSPStreamer> GstRTSPStreamerManager::createStreamer(
+    const std::string & topic,
+    const std::string & codec,
+    int rtsp_port)
 {
-  std::lock_guard<std::mutex> lock(streamers_mutex_);
-  
-  // Create a unique stream key combining topic and codec for better identification
-  std::string stream_key = topic + "_" + codec;
-  
-  // Check if streamer already exists for this exact topic
-  auto it = streamers_.find(stream_key);
-  if (it != streamers_.end() && it->second->isActive()) {
-    RCLCPP_INFO(node_->get_logger(), "Reusing existing RTSP stream for %s", stream_key.c_str());
-    return it->second;
-  }
-  
-  // Assign port if not specified
-  if (rtsp_port == 0) {
-    rtsp_port = next_port_++;
-  }
-  
-  // Create new streamer
-  RCLCPP_INFO(node_->get_logger(), "Creating new RTSP stream for %s on port %d", stream_key.c_str(), rtsp_port);
-  auto streamer = std::make_shared<RTSPStreamer>(node_, topic, codec, rtsp_port);
-  streamers_[stream_key] = streamer;
-  
-  return streamer;
-}
-
-void RTSPStreamerManager::removeStreamer(const std::string & topic)
-{
-  std::lock_guard<std::mutex> lock(streamers_mutex_);
-  
-  // Remove all streams for this topic (any codec)
-  auto it = streamers_.begin();
-  while (it != streamers_.end()) {
-    if (it->first.find(topic + "_") == 0) {
-      RCLCPP_INFO(node_->get_logger(), "Removing RTSP stream for %s", it->first.c_str());
-      it->second->stop();
-      it = streamers_.erase(it);
-    } else {
-      ++it;
+    std::lock_guard<std::mutex> lock(streamers_mutex_);
+    std::string stream_key = topic + "_" + codec;
+    auto it = streamers_.find(stream_key);
+    if (it != streamers_.end() && it->second->isActive())
+    {
+        return it->second;
     }
-  }
-}
 
-std::shared_ptr<RTSPStreamer> RTSPStreamerManager::getStreamer(const std::string & topic)
-{
-  std::lock_guard<std::mutex> lock(streamers_mutex_);
-  
-  // Search for any stream matching the topic (first found)
-  for (const auto& pair : streamers_) {
-    if (pair.first.find(topic + "_") == 0) {
-      return pair.second;
+    if (rtsp_port == 0) {
+        rtsp_port = next_port_++;
     }
-  }
-  
-  return nullptr;
+
+    auto streamer = std::make_shared<GstRTSPStreamer>(node_, topic, codec, rtsp_port);
+    streamers_[stream_key] = streamer;
+
+    return streamer;
 }
 
-std::vector<std::string> RTSPStreamerManager::getActiveStreams() const
+void GstRTSPStreamerManager::removeStreamer(const std::string & topic)
 {
-  std::lock_guard<std::mutex> lock(streamers_mutex_);
-  std::vector<std::string> active_streams;
-  
-  for (const auto& pair : streamers_) {
-    if (pair.second->isActive()) {
-      active_streams.push_back(pair.first);
+    std::lock_guard<std::mutex> lock(streamers_mutex_);
+    auto it = streamers_.begin();
+    while (it != streamers_.end())
+    {
+        if (it->first.find(topic + "_") == 0)
+        {
+            it->second->stop();
+            it = streamers_.erase(it);
+        } else
+        {
+            ++it;
+        }
     }
-  }
-  
-  return active_streams;
 }
 
-void RTSPStreamerManager::cleanup()
+std::shared_ptr<GstRTSPStreamer> GstRTSPStreamerManager::getStreamer(const std::string & topic)
 {
-  std::lock_guard<std::mutex> lock(streamers_mutex_);
-  for (auto& pair : streamers_) {
-    pair.second->stop();
-  }
-  streamers_.clear();
-}
-
-void RTSPStreamerManager::cleanupInactiveStreamers()
-{
-  std::lock_guard<std::mutex> lock(streamers_mutex_);
-  
-  auto it = streamers_.begin();
-  while (it != streamers_.end()) {
-    if (!it->second->isActive()) {
-      it = streamers_.erase(it);
-    } else {
-      ++it;
+    std::lock_guard<std::mutex> lock(streamers_mutex_);
+    for (const auto & pair : streamers_)
+    {
+        if (pair.first.find(topic + "_") == 0)
+        {
+            return pair.second;
+        }
     }
-  }
+    return nullptr;
+}
+
+std::vector<std::string> GstRTSPStreamerManager::getActiveStreams() const
+{
+    std::lock_guard<std::mutex> lock(streamers_mutex_);
+    std::vector<std::string> active_streams;
+    for (const auto & pair : streamers_)
+    {
+        if (pair.second->isActive())
+        {
+            active_streams.push_back(pair.first);
+        }
+    }
+    return active_streams;
+}
+
+void GstRTSPStreamerManager::cleanup()
+{
+    std::lock_guard<std::mutex> lock(streamers_mutex_);
+    for (auto & pair : streamers_)
+    {
+        pair.second->stop();
+    }
+    streamers_.clear();
+}
+
+void GstRTSPStreamerManager::cleanupInactiveStreamers()
+{
+    std::lock_guard<std::mutex> lock(streamers_mutex_);
+    auto it = streamers_.begin();
+    while (it != streamers_.end())
+    {
+        if (!it->second->isActive())
+        {
+            it = streamers_.erase(it);
+        } else
+        {
+            ++it;
+        }
+    }
 }
 
 }  // namespace web_video_server

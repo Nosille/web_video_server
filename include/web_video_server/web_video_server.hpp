@@ -133,7 +133,7 @@ private:
   std::mutex subscriber_mutex_;
   
   // RTSP streaming
-  std::shared_ptr<RTSPStreamerManager> rtsp_manager_;
+  std::shared_ptr<GstRTSPStreamerManager> rtsp_manager_;
 };
 
 }  // namespace web_video_server
