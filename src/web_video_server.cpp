@@ -79,36 +79,10 @@ WebVideoServer::WebVideoServer(const rclcpp::NodeOptions & options)
   stream_types_["h264"] = std::make_shared<H264StreamerType>();
   stream_types_["vp9"] = std::make_shared<Vp9StreamerType>();
 
-  handler_group_.addHandlerForPath(
-    "/",
-    boost::bind(&WebVideoServer::handle_list_streams, this, _1, _2, _3, _4));
-  handler_group_.addHandlerForPath(
-    "/stream",
-    boost::bind(&WebVideoServer::handle_stream, this, _1, _2, _3, _4));
-  handler_group_.addHandlerForPath(
-    "/stream_viewer",
-    boost::bind(&WebVideoServer::handle_stream_viewer, this, _1, _2, _3, _4));
-  handler_group_.addHandlerForPath(
-    "/snapshot",
-    boost::bind(&WebVideoServer::handle_snapshot, this, _1, _2, _3, _4));
+  initializeHttpServer(server_threads);
 
-  try {
-    server_.reset(
-      new async_web_server_cpp::HttpServer(
-        address_, std::to_string(port_),
-        boost::bind(&WebVideoServer::handle_request, this, _1, _2, _3, _4),
-        server_threads
-      )
-    );
-  } catch (boost::exception & e) {
-    RCLCPP_ERROR(
-      get_logger(), "Exception when creating the web server! %s:%d",
-      address_.c_str(), port_);
-    throw;
-  }
-
-  RCLCPP_INFO(get_logger(), "Waiting For connections on %s:%d", address_.c_str(), port_);
-
+  
+  // Initialize timers
   if (publish_rate_ > 0) {
     create_wall_timer(1s / publish_rate_, [this]() {restreamFrames(1s / publish_rate_);});
   }
@@ -337,7 +311,7 @@ bool WebVideoServer::handle_list_streams(
           connection->write("</a> (");
           connection->write("<a href=\"/stream?topic=");
           connection->write(*image_topic_itr);
-          connection->write("\">Stream</a>) (");
+          connection->write("\">HTTP Stream</a>) (");
           connection->write("<a href=\"/snapshot?topic=");
           connection->write(*image_topic_itr);
           connection->write("\">Snapshot</a>)");
@@ -364,7 +338,7 @@ bool WebVideoServer::handle_list_streams(
     connection->write("</a> (");
     connection->write("<a href=\"/stream?topic=");
     connection->write(*image_topic_itr);
-    connection->write("\">Stream</a>) (");
+    connection->write("\">HTTP Stream</a>) (");
     connection->write("<a href=\"/snapshot?topic=");
     connection->write(*image_topic_itr);
     connection->write("\">Snapshot</a>)");
@@ -399,6 +373,38 @@ bool WebVideoServer::handle_list_streams(
   //End
   connection->write("</ul></body></html>");
   return true;
+}
+
+void WebVideoServer::initializeHttpServer(int server_threads) {
+  // Setup HTTP request handlers
+  handler_group_.addHandlerForPath(
+    "/",
+    boost::bind(&WebVideoServer::handle_list_streams, this, _1, _2, _3, _4));
+  handler_group_.addHandlerForPath(
+    "/stream",
+    boost::bind(&WebVideoServer::handle_stream, this, _1, _2, _3, _4));
+  handler_group_.addHandlerForPath(
+    "/stream_viewer",
+    boost::bind(&WebVideoServer::handle_stream_viewer, this, _1, _2, _3, _4));
+  handler_group_.addHandlerForPath(
+    "/snapshot",
+    boost::bind(&WebVideoServer::handle_snapshot, this, _1, _2, _3, _4));
+
+  try {
+    server_.reset(
+      new async_web_server_cpp::HttpServer(
+        address_, std::to_string(port_),
+        boost::bind(&WebVideoServer::handle_request, this, _1, _2, _3, _4),
+        server_threads
+      )
+    );
+    RCLCPP_INFO(get_logger(), "HTTP server initialized on %s:%d", address_.c_str(), port_);
+  } catch (boost::exception & e) {
+    RCLCPP_ERROR(
+      get_logger(), "Exception when creating the HTTP server! %s:%d",
+      address_.c_str(), port_);
+    throw;
+  }
 }
 
 }  // namespace web_video_server

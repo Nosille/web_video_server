@@ -1,6 +1,5 @@
 
-#ifndef IMAGE_TRANSPORT_SUBSCRIBER_H_
-#define IMAGE_TRANSPORT_SUBSCRIBER_H_
+#pragma once
 
 #include <image_transport/image_transport.hpp>
 #include <image_transport/transport_hints.hpp>
@@ -21,7 +20,7 @@ class ImageTransportSubscriber : public RosSubscriber
                            const std::string& topic, 
                            const ImageCallback& callback);    
     
-    void subscriberCallback(const sensor_msgs::msg::Image::ConstPtr &input_msg);
+    void subscriberCallback(const sensor_msgs::msg::Image::ConstSharedPtr &input_msg);
   
   private:
     image_transport::Subscriber ros_sub_;
@@ -35,5 +34,3 @@ class ImageTransportSubscriberType : public SubscriberType
 };
 
 } //web_video_server
-
-#endif //IMAGE_TRANSPORT_SUBSCRIBER_H_

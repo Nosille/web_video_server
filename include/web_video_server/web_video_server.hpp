@@ -96,6 +96,7 @@ public:
 private:
   void restreamFrames(std::chrono::duration<double> max_age);
   void cleanup_inactive_streams();
+  void initializeHttpServer(int server_threads);
 
   rclcpp::TimerBase::SharedPtr cleanup_timer_;
 

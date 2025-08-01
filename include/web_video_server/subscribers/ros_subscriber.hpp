@@ -1,6 +1,5 @@
 
-#ifndef ROS_SUBSCRIBER_H_
-#define ROS_SUBSCRIBER_H_
+#pragma once
 
 #include <functional>
 
@@ -13,7 +12,7 @@
 
 namespace web_video_server
 {
-  typedef std::function<void(const sensor_msgs::msg::Image::ConstPtr&)> ImageCallback; 
+  typedef std::function<void(const sensor_msgs::msg::Image::ConstSharedPtr&)> ImageCallback;
 
 class RosSubscriber
 {
@@ -27,7 +26,7 @@ class RosSubscriber
                            const std::string& topic,
                            const ImageCallback& callback);
 
-    virtual void subscriberCallback(const sensor_msgs::msg::Image::ConstPtr &input_msg);            
+    virtual void subscriberCallback(const sensor_msgs::msg::Image::ConstSharedPtr &input_msg);
 
   protected:
     rclcpp::Node::SharedPtr node_;
@@ -45,5 +44,3 @@ class SubscriberType
 };
 
 } // web_video_server
-
-#endif //ROS_SUBSCRIBER_H_
