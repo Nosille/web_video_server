@@ -99,26 +99,26 @@ WebVideoServer::~WebVideoServer()
 
 void WebVideoServer::restreamFrames(std::chrono::duration<double> max_age)
 {
-  std::scoped_lock lock(subscriber_mutex_);
+  std::scoped_lock lock(streamer_mutex_);
 
-  for (auto & subscriber : image_subscribers_) {
-    subscriber->restreamFrame(max_age);
+  for (auto & streamer : image_streamers_) {
+    streamer->restreamFrame(max_age);
   }
 }
 
 void WebVideoServer::cleanup_inactive_streams()
 {
-  std::unique_lock lock(subscriber_mutex_, std::try_to_lock);
+  std::unique_lock lock(streamer_mutex_, std::try_to_lock);
   if (lock) {
     auto new_end = std::partition(
-      image_subscribers_.begin(), image_subscribers_.end(),
+      image_streamers_.begin(), image_streamers_.end(),
       [](const std::shared_ptr<ImageStreamer> & streamer) {return !streamer->isInactive();});
     if (verbose_) {
-      for (auto itr = new_end; itr < image_subscribers_.end(); ++itr) {
+      for (auto itr = new_end; itr < image_streamers_.end(); ++itr) {
         RCLCPP_INFO(get_logger(), "Removed Stream: %s", (*itr)->getTopic().c_str());
       }
     }
-    image_subscribers_.erase(new_end, image_subscribers_.end());
+    image_streamers_.erase(new_end, image_streamers_.end());
   }
 }
 
@@ -178,8 +178,8 @@ bool WebVideoServer::handle_stream(
     std::shared_ptr<ImageStreamer> streamer = stream_types_[type]->create_streamer(
       request, connection, shared_from_this());
     streamer->start();
-    std::scoped_lock lock(subscriber_mutex_);
-    image_subscribers_.push_back(streamer);
+    std::scoped_lock lock(streamer_mutex_);
+    image_streamers_.push_back(streamer);
   } else {
     async_web_server_cpp::HttpReply::stock_reply(async_web_server_cpp::HttpReply::not_found)(
       request, connection, begin, end);
@@ -196,8 +196,8 @@ bool WebVideoServer::handle_snapshot(
     request, connection, shared_from_this());
   streamer->start();
 
-  std::scoped_lock lock(subscriber_mutex_);
-  image_subscribers_.push_back(streamer);
+  std::scoped_lock lock(streamer_mutex_);
+  image_streamers_.push_back(streamer);
   return true;
 }
 
@@ -361,6 +361,9 @@ bool WebVideoServer::handle_list_streams(
     connection->write("\">");
     connection->write(*pointcloud2_topic_itr);
     connection->write("</a> (");
+    connection->write("<a href=\"/stream?topic=");
+    connection->write(*pointcloud2_topic_itr);
+    connection->write("\">HTTP Stream</a>) (");
     connection->write("<a href=\"/snapshot?topic=");
     connection->write(*pointcloud2_topic_itr);
     connection->write("\">Snapshot</a>)");

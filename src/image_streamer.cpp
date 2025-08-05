@@ -129,23 +129,28 @@ void ImageStreamer::restreamFrame(std::chrono::duration<double> max_age)
 cv::Mat ImageStreamer::decodeImage(
   const sensor_msgs::msg::Image::ConstSharedPtr & msg)
 {
-  if (sensor_msgs::image_encodings::isColor(msg->encoding)) {
-    if(sensor_msgs::image_encodings::bitDepth(msg->encoding) == 16)
-    {
-      RCLCPP_DEBUG(node_->get_logger(), "16 bit color");
-      return cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR16)->image;
-    }
-    else
-    {
-      RCLCPP_DEBUG(node_->get_logger(), "8 bit color");
-      return cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8)->image;
-    }
-  } else if (msg->encoding.find("F") != std::string::npos) {
+  // Handle grayscale formats
+  if (msg->encoding == sensor_msgs::image_encodings::TYPE_8UC1||
+           msg->encoding == sensor_msgs::image_encodings::TYPE_8SC1||
+           msg->encoding == sensor_msgs::image_encodings::TYPE_16UC1||
+           msg->encoding == sensor_msgs::image_encodings::TYPE_16SC1) {
+    RCLCPP_INFO(node_->get_logger(), "Greyscale format: %s", msg->encoding.c_str());
+    cv::Mat image_bridge = cv_bridge::toCvCopy(msg, msg->encoding.c_str())->image;
+    cv::Mat normalized_image;
+    cv::normalize(image_bridge, normalized_image, 0, 255, cv::NORM_MINMAX);
+    
+    return normalized_image;
+  }
+  // Handle floating point images
+  else if (msg->encoding.find("F") != std::string::npos) {
+    RCLCPP_INFO(node_->get_logger(), "Floating point format: %s", msg->encoding.c_str());    
     // scale floating point images
     cv::Mat float_image_bridge = cv_bridge::toCvCopy(msg, msg->encoding)->image;
     cv::Mat_<float> float_image = float_image_bridge;
+    cv::Mat nonInfMask = (float_image < std::numeric_limits<float>::max());
     double max_val;
-    cv::minMaxIdx(float_image, 0, &max_val);
+    int minLoc, maxLoc;
+    cv::minMaxIdx(float_image, 0, &max_val, &minLoc, &maxLoc, nonInfMask);
 
     if (max_val > 0) {
       float_image *= (255 / max_val);
@@ -154,7 +159,6 @@ cv::Mat ImageStreamer::decodeImage(
   } else {
     // Convert to OpenCV native BGR color
     auto & clk = *node_->get_clock();
-    RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "unknown data type will try to convert to bgr8");    
     return cv_bridge::toCvCopy(msg, "bgr8")->image;
   }
 }
@@ -168,7 +172,7 @@ void ImageStreamer::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr 
   cv::Mat img;
   try {
     img = decodeImage(msg);
-
+    
     int input_width = img.cols;
     int input_height = img.rows;
 

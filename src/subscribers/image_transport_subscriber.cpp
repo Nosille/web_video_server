@@ -10,12 +10,15 @@ ImageTransportSubscriber::ImageTransportSubscriber(rclcpp::Node::SharedPtr node)
 
 ImageTransportSubscriber::~ImageTransportSubscriber()
 {
+    std::scoped_lock lock(subscriber_mutex_);
 }
 
 void ImageTransportSubscriber::subscribe(const async_web_server_cpp::HttpRequest &request,
                                          const std::string& topic, 
                                          const ImageCallback& callback)
 {
+  std::scoped_lock lock(subscriber_mutex_);
+  
   callback_ = callback;
   std::string transport = request.get_query_param_value_or_default("transport", "raw");
   qos_profile_name_ = request.get_query_param_value_or_default("qos_profile", "default");
@@ -42,6 +45,8 @@ void ImageTransportSubscriber::subscribe(const async_web_server_cpp::HttpRequest
 
 void ImageTransportSubscriber::subscriberCallback(const sensor_msgs::msg::Image::ConstSharedPtr &input_msg)
 {
+  std::scoped_lock lock(subscriber_mutex_);
+  
   callback_(input_msg);
 }
 

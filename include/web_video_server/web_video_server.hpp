@@ -111,9 +111,9 @@ private:
   std::shared_ptr<async_web_server_cpp::HttpServer> server_;
   async_web_server_cpp::HttpRequestHandlerGroup handler_group_;
 
-  std::vector<std::shared_ptr<ImageStreamer>> image_subscribers_;
+  std::vector<std::shared_ptr<ImageStreamer>> image_streamers_;
   std::map<std::string, std::shared_ptr<ImageStreamerType>> stream_types_;
-  std::mutex subscriber_mutex_;
+  std::mutex streamer_mutex_;
 };
 
 }  // namespace web_video_server

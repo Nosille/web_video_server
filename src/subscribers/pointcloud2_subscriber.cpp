@@ -6,6 +6,7 @@ namespace web_video_server
 PointCloud2Subscriber::PointCloud2Subscriber(rclcpp::Node::SharedPtr node)
 : RosSubscriber(node)
 {
+  std::scoped_lock lock(subscriber_mutex_);
   // Initialize our TF items
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -23,12 +24,14 @@ PointCloud2Subscriber::PointCloud2Subscriber(rclcpp::Node::SharedPtr node)
 
 PointCloud2Subscriber::~PointCloud2Subscriber()
 {
+    std::scoped_lock lock(subscriber_mutex_);
 }
 
 void PointCloud2Subscriber::subscribe(const async_web_server_cpp::HttpRequest &request,
                                          const std::string& topic, 
                                          const ImageCallback& callback)
 {
+  std::scoped_lock lock(subscriber_mutex_);
   callback_ = callback;
   qos_profile_name_ = request.get_query_param_value_or_default("qos_profile", "default");
 
@@ -63,7 +66,8 @@ void PointCloud2Subscriber::subscribe(const async_web_server_cpp::HttpRequest &r
 
 void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg)
 {
-  RCLCPP_DEBUG_STREAM(node_->get_logger(),"Recieved PointCloud2: " << frame_id_);
+  RCLCPP_DEBUG_STREAM(node_->get_logger(),"Received PointCloud2: ");
+  std::scoped_lock lock(subscriber_mutex_);
 
   if (input_msg->data.size() == 0)
   {
@@ -175,7 +179,6 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
             }
             else if((userField.datatype == sensor_msgs::msg::PointField::UINT8))
             {
-              
               uint8_t value;
               std::memcpy(&value, &output_cloud.data[i * output_cloud.point_step + userField.offset],sizeof(uint8_t));
               userImage.image.at<uint8_t>(j, k) = value;      
@@ -311,12 +314,6 @@ bool PointCloud2Subscriber::FindFields(const sensor_msgs::msg::PointCloud2::Cons
   }
 
   return true;
-}
-
-std::shared_ptr<RosSubscriber> PointCloud2SubscriberType::create_subscriber(rclcpp::Node::SharedPtr node)
-{
-  return std::shared_ptr<RosSubscriber>(
-      new PointCloud2Subscriber(node));
 }
 
 sensor_msgs::msg::PointCloud2 PointCloud2Subscriber::TransformFrame(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg, std::string frame_id)
@@ -632,6 +629,12 @@ cv_bridge::CvImage PointCloud2Subscriber::ConvertToColor(const cv::Mat &depthMas
   }
   
   return colorImage;
+}
+
+std::shared_ptr<RosSubscriber> PointCloud2SubscriberType::create_subscriber(rclcpp::Node::SharedPtr node)
+{
+  return std::shared_ptr<RosSubscriber>(
+      new PointCloud2Subscriber(node));
 }
 
 }

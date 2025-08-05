@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include <mutex>
 #include <functional>
 
 #include <rclcpp/rclcpp.hpp>
@@ -27,6 +28,8 @@ class RosSubscriber
                            const ImageCallback& callback);
 
     virtual void subscriberCallback(const sensor_msgs::msg::Image::ConstSharedPtr &input_msg);
+
+    std::mutex subscriber_mutex_;
 
   protected:
     rclcpp::Node::SharedPtr node_;

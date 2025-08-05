@@ -16,6 +16,8 @@ void RosSubscriber::subscribe(const async_web_server_cpp::HttpRequest &request,
                               const std::string& topic,
                               const ImageCallback& callback)
 {
+  std::scoped_lock lock(subscriber_mutex_);
+  
   callback_ = callback;
   qos_profile_name_ = request.get_query_param_value_or_default("qos_profile", "default");
 
@@ -35,13 +37,14 @@ void RosSubscriber::subscribe(const async_web_server_cpp::HttpRequest &request,
   rclcpp::QoS qos = rclcpp::QoS(
     rclcpp::QoSInitialization(qos_profile.value().history, 1),
     qos_profile.value());
-  
+
   ros_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(topic, qos, std::bind(&RosSubscriber::subscriberCallback, this, std::placeholders::_1));
 }
 
 
 void RosSubscriber::subscriberCallback(const sensor_msgs::msg::Image::ConstSharedPtr &input_msg)
 {
+  std::scoped_lock lock(subscriber_mutex_);
   callback_(input_msg);
 }
 
