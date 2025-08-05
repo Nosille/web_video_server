@@ -7,9 +7,10 @@ PointCloud2Subscriber::PointCloud2Subscriber(rclcpp::Node::SharedPtr node)
 : RosSubscriber(node)
 {
   std::scoped_lock lock(subscriber_mutex_);
+  RCLCPP_INFO_STREAM(node_->get_logger(),"Create PointCloud2 subscriber: ");
   // Initialize our TF items
-  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node->get_clock());
-  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node->get_clock(), std::chrono::seconds(10));
+  tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_, node, true);
   
   tf2::Quaternion q;
   q.setRPY(M_PI / 2.0, - M_PI / 2.0, 0.0);
@@ -35,16 +36,26 @@ void PointCloud2Subscriber::subscribe(const async_web_server_cpp::HttpRequest &r
   callback_ = callback;
   qos_profile_name_ = request.get_query_param_value_or_default("qos_profile", "default");
 
-  frame_id_ = request.get_query_param_value_or_default("frame_id", "base_link");
+  wait_for_tf_delay_ = node_->get_parameter("wait_for_tf_delay").as_double();
   wait_for_tf_delay_ = 0.10;
-  field_ = request.get_query_param_value_or_default("field", "depth");
+
+  std::string default_frame_id = node_->get_parameter("frame_id").as_string();
+  frame_id_ = request.get_query_param_value_or_default("frame_id", default_frame_id);
+  
+  bool default_color = node_->get_parameter("colorize").as_bool();
+  colorize_ = request.get_query_param_value_or_default<bool>("colorize", true);  
+
+  bool default_normalize = node_->get_parameter("normalize").as_bool();
+  normalize_ = request.get_query_param_value_or_default<bool>("normalize", default_normalize);  
+
+  std::string default_field = node_->get_parameter("field").as_string();
+  field_ = request.get_query_param_value_or_default("field", default_field);
+
   height_ = request.get_query_param_value_or_default<int>("height", 600);
   width_  = request.get_query_param_value_or_default<int>("width", 800);
   pixel_size_ = request.get_query_param_value_or_default<int>("pixel_size", 5);
   focal_length_ = request.get_query_param_value_or_default<double>("focal_length", 300.0);
-  background_ = request.get_query_param_value_or_default("background", true);  
 
-  // Get QoS profile from query parameter
   RCLCPP_INFO(
     node_->get_logger(), "Streaming topic %s with QoS profile %s", topic.c_str(),
     qos_profile_name_.c_str());
@@ -60,8 +71,11 @@ void PointCloud2Subscriber::subscribe(const async_web_server_cpp::HttpRequest &r
   const auto qos = rclcpp::QoS(
     rclcpp::QoSInitialization(qos_profile.value().history, 1),
     qos_profile.value());
-  
-  ros_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(topic, qos, std::bind(&PointCloud2Subscriber::subscriberCallback, this, std::placeholders::_1));
+
+  cbg_sub_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  rclcpp::SubscriptionOptions options;
+  options.callback_group = cbg_sub_;
+  ros_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(topic, qos, std::bind(&PointCloud2Subscriber::subscriberCallback, this, std::placeholders::_1), options);
 }
 
 void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg)
@@ -79,7 +93,8 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
   auto beginTime = std::chrono::steady_clock::now();
 
   //transform
-  sensor_msgs::msg::PointCloud2 output_cloud = TransformFrame(input_msg, frame_id_);
+  sensor_msgs::msg::PointCloud2 output_cloud; 
+  output_cloud = TransformFrame(input_msg, frame_id_);
 
   // Find relevant fields
   sensor_msgs::msg::PointField xField, yField, zField, userField;  
@@ -90,14 +105,12 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
   RCLCPP_DEBUG_STREAM(node_->get_logger(),"    Camera Info");
   cv::Mat intrinsic_matrix, distortion_coefficients;
   GatherCameraInfo(intrinsic_matrix, distortion_coefficients);
+  
   // Setup depth image
   RCLCPP_DEBUG_STREAM(node_->get_logger(),"    Depth");           
   cv_bridge::CvImage depthImage;
-  depthImage.header = output_cloud.header;
-  depthImage.header.frame_id = frame_id_;
-  depthImage.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
-  depthImage.image = cv::Mat::ones(height_, width_, CV_32FC1) * std::numeric_limits<float>::max();
-
+  CreateDepthImage(output_cloud.header, depthImage);
+  
   // Setup user image
   RCLCPP_DEBUG_STREAM(node_->get_logger(),"    User-Datatype: " << +userField.datatype);
   cv_bridge::CvImage userImage;
@@ -219,13 +232,22 @@ void PointCloud2Subscriber::subscriberCallback(const sensor_msgs::msg::PointClou
     }
   }
 
-  cv_bridge::CvImage colorImage;
-  if (background_) {
-    colorImage = ConvertToColor(depthMask, depthImage, userImage);
-  } else if (field_ == "depth") {
-    colorImage = depthImage;
+  // Normalize
+  cv_bridge::CvImage normalized_image;  
+    if (field_ == "depth") { 
+    normalized_image = depthImage; 
+  } else if (normalize_) { 
+    normalized_image = NormalizeImage(userImage); 
   } else {
-    colorImage = userImage;
+    normalized_image = userImage;
+  }
+
+  // Convert to color
+  cv_bridge::CvImage colorImage;
+  if (colorize_) {
+    colorImage = ConvertToColor(depthMask, normalized_image);
+  } else {
+    colorImage = normalized_image;
   }
 
   // Performance timing
@@ -319,22 +341,33 @@ bool PointCloud2Subscriber::FindFields(const sensor_msgs::msg::PointCloud2::Cons
 sensor_msgs::msg::PointCloud2 PointCloud2Subscriber::TransformFrame(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg, std::string frame_id)
 {
   RCLCPP_DEBUG_STREAM(node_->get_logger(),"  Transform");
-  geometry_msgs::msg::TransformStamped transform;
   sensor_msgs::msg::PointCloud2 output_cloud;  
+  geometry_msgs::msg::TransformStamped transform;
   try
   {
-    //Get transform to requested frame
-    transform = tf_buffer_->lookupTransform(frame_id, input_msg->header.frame_id, input_msg->header.stamp, rclcpp::Duration::from_seconds(wait_for_tf_delay_));
-      
-    // Transform into a z-forward orientation of requested frame for opencv
     transform_optical_.header = transform.header;
-    tf2::doTransform(transform.transform, transform.transform, transform_optical_);
+    if(frame_id_ == "") {
+      transform = transform_optical_;
+    } else {
+      if(tf_buffer_->canTransform(frame_id, input_msg->header.frame_id, input_msg->header.stamp, rclcpp::Duration::from_seconds(wait_for_tf_delay_)))
+      {
+        transform = tf_buffer_->lookupTransform(frame_id, input_msg->header.frame_id, input_msg->header.stamp);
+        
+      // Transform into a z-forward orientation of requested frame for opencv
+      tf2::doTransform(transform.transform, transform.transform, transform_optical_);
+      }
+      else
+      {
+        RCLCPP_WARN_STREAM(node_->get_logger(), "  PointCloud2 subscriber is waiting for transform from " << input_msg->header.frame_id << " to " << frame_id << " to become available.");
+        transform = transform_optical_;
+      }
+    }
     tf2::doTransform(*input_msg, output_cloud, transform);
   }
   catch (tf2::TransformException &ex) 
   {
-    RCLCPP_WARN_STREAM(node_->get_logger(),"  Publish Thread: " << ex.what());
-    output_cloud = *input_msg;
+    RCLCPP_WARN_STREAM(node_->get_logger(), "  PointCloud2 subscriber: " << ex.what());
+    output_cloud = *input_msg;        
   }
 
   return output_cloud;
@@ -357,7 +390,7 @@ void PointCloud2Subscriber::GatherCameraInfo(cv::Mat &intrinsic_matrix, cv::Mat 
 bool PointCloud2Subscriber::CreateUserImage(const std_msgs::msg::Header &cloud_header, const sensor_msgs::msg::PointField &userField, cv_bridge::CvImage& userImage)
 { 
   userImage.header = cloud_header;
-  userImage.header.frame_id = frame_id_;
+  if(frame_id_ != "") userImage.header.frame_id = frame_id_;
   if((userField.datatype == sensor_msgs::msg::PointField::UINT8   && userField.count == 4) ||
       (userField.datatype == sensor_msgs::msg::PointField::UINT32  && (userField.name == "rgb" || userField.name == "rgba")) ||
       (userField.datatype == sensor_msgs::msg::PointField::FLOAT32 && (userField.name == "rgb" || userField.name == "rgba"))
@@ -391,7 +424,7 @@ bool PointCloud2Subscriber::CreateUserImage(const std_msgs::msg::Header &cloud_h
   {
      RCLCPP_DEBUG_STREAM(node_->get_logger(),"      1 16-bit unsigned integer");               
     userImage.encoding = sensor_msgs::image_encodings::TYPE_16UC1;
-    userImage.image = cv::Mat::zeros(height_, width_, CV_16UC1);            
+    userImage.image = cv::Mat::zeros(height_, width_, CV_16UC1);
   }
   else if((userField.datatype == sensor_msgs::msg::PointField::INT16))
   {
@@ -419,8 +452,14 @@ bool PointCloud2Subscriber::CreateUserImage(const std_msgs::msg::Header &cloud_h
   return true;
 }
 
-bool PointCloud2Subscriber::CreateDepthImage(const std_msgs::msg::Header &cloud_header, const sensor_msgs::msg::PointField &userField, cv_bridge::CvImage& depthImage)
+bool PointCloud2Subscriber::CreateDepthImage(const std_msgs::msg::Header &cloud_header, cv_bridge::CvImage& depthImage)
 { 
+  depthImage.header = cloud_header;
+  if(frame_id_ != "") depthImage.header.frame_id = frame_id_;
+  depthImage.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
+  depthImage.image = cv::Mat::ones(height_, width_, CV_32FC1) * std::numeric_limits<float>::max();
+
+  return true;
 }
 
 std::vector<cv::Point2f> PointCloud2Subscriber::ProjectPoints(const sensor_msgs::msg::PointCloud2 &output_cloud,
@@ -464,9 +503,42 @@ std::vector<cv::Point2f> PointCloud2Subscriber::ProjectPoints(const sensor_msgs:
   return img_pts;
 }
 
-cv_bridge::CvImage PointCloud2Subscriber::ConvertToColor(const cv::Mat &depthMask, const cv_bridge::CvImage &depthImage, const cv_bridge::CvImage &userImage)
+cv_bridge::CvImage PointCloud2Subscriber::NormalizeImage(const cv_bridge::CvImage &inputImage)
 {
-    // Create gradient background image (BGR format for depth visualization)
+  cv_bridge::CvImage normalized_image;
+  if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_16UC3) {
+    cv::normalize(inputImage.image, normalized_image.image, 0, 65535, cv::NORM_MINMAX);
+    normalized_image.header = inputImage.header;
+    normalized_image.encoding = inputImage.encoding;
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_8UC3) {
+    cv::normalize(inputImage.image, normalized_image.image, 0, 255, cv::NORM_MINMAX);
+    normalized_image.header = inputImage.header;
+    normalized_image.encoding = inputImage.encoding;    
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_16UC1) {
+    cv::normalize(inputImage.image, normalized_image.image, 0, 65535, cv::NORM_MINMAX);
+    normalized_image.header = inputImage.header;
+    normalized_image.encoding = inputImage.encoding;    
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_16SC1) {
+    cv::normalize(inputImage.image, normalized_image.image, -32768, 32767, cv::NORM_MINMAX);
+    normalized_image.header = inputImage.header;
+    normalized_image.encoding = inputImage.encoding;    
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_8UC1) {
+    cv::normalize(inputImage.image, normalized_image.image, 0, 255, cv::NORM_MINMAX);
+    normalized_image.header = inputImage.header;
+    normalized_image.encoding = inputImage.encoding;        
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_8SC1) {
+    cv::normalize(inputImage.image, normalized_image.image, -128, 127, cv::NORM_MINMAX);
+    normalized_image.header = inputImage.header;
+    normalized_image.encoding = inputImage.encoding;            
+  } else {
+   normalized_image = inputImage;
+  }
+
+  return normalized_image;
+}
+cv_bridge::CvImage PointCloud2Subscriber::ConvertToColor(const cv::Mat &depthMask, const cv_bridge::CvImage &inputImage)
+{
+  // Create gradient background image (BGR format for depth visualization)
   cv::Mat gradientBackground = cv::Mat::zeros(height_, width_, CV_8UC3);
   for (int row = 0; row < height_; row++) {
     for (int col = 0; col < width_; col++) {
@@ -491,18 +563,19 @@ cv_bridge::CvImage PointCloud2Subscriber::ConvertToColor(const cv::Mat &depthMas
   // Setup color image
    RCLCPP_DEBUG_STREAM(node_->get_logger(),"    Color");        
   cv_bridge::CvImage colorImage;
-  colorImage.header = userImage.header;
-  colorImage.header.frame_id = frame_id_;
-  if(field_ == "depth") {
+  colorImage.header = inputImage.header;
+  if(frame_id_ != "") colorImage.header.frame_id = frame_id_;  
+  if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
+    RCLCPP_DEBUG_STREAM(node_->get_logger(),"Converting TYPE_32FC1 to color");      
     colorImage.encoding = sensor_msgs::image_encodings::BGR8;
     colorImage.image = cv::Mat::zeros(height_, width_, 'bgr8');  
     for (int row = 0; row < height_; row++) {
       for (int col = 0; col < width_; col++) {
         if (depthMask.at<uint8_t>(row, col) == 255) {
           // Pixel has real depth data - convert depth to grayscale and display as white/gray
-          float depth_value = depthImage.image.at<float>(row, col);
+          float depth_value = inputImage.image.at<float>(row, col);
           // Normalize depth to 0-255 range (assuming max depth ~10 meters)
-          uint8_t intensity = static_cast<uint8_t>(std::min(255.0f, depth_value * 25.5f)); // 10m -> 255
+          uint8_t intensity = static_cast<uint8_t>(std::min(255.0f, depth_value * 2.55f)); // 10m -> 255
           
           cv::Vec3b& pixel = colorImage.image.at<cv::Vec3b>(row, col);
           pixel[0] = intensity; // B
@@ -514,42 +587,67 @@ cv_bridge::CvImage PointCloud2Subscriber::ConvertToColor(const cv::Mat &depthMas
         }
       }
     }
-  } else if(userImage.encoding == sensor_msgs::image_encodings::TYPE_16UC3) {
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_32FC3) {
+    RCLCPP_DEBUG_STREAM(node_->get_logger(),"Converting TYPE_32FC3 to color");    
+    colorImage.encoding = sensor_msgs::image_encodings::BGR8;
+    colorImage.image = cv::Mat::zeros(height_, width_, 'bgr8');  
+    for (int row = 0; row < height_; row++) {
+      for (int col = 0; col < width_; col++) {
+        if (depthMask.at<uint8_t>(row, col) == 255) {
+          // Pixel has real depth data - convert depth to grayscale and display as white/gray
+          cv::Vec3f depth_value = inputImage.image.at<cv::Vec3f>(row, col);
+          
+          cv::Vec3b& pixel = colorImage.image.at<cv::Vec3b>(row, col);
+          pixel[0] = static_cast<uint8_t>(std::min(255.0f, depth_value[0] * 2.55f)); // B
+          pixel[1] = static_cast<uint8_t>(std::min(255.0f, depth_value[1] * 2.55f)); // G  
+          pixel[2] = static_cast<uint8_t>(std::min(255.0f, depth_value[2] * 2.55f)); // R (grayscale)
+        } else {
+          // Pixel has no depth data - use gradient background value
+          colorImage.image.at<cv::Vec3b>(row, col) = gradientBackground.at<cv::Vec3b>(row, col);
+        }
+      }
+    }
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_16UC3) {
+    RCLCPP_DEBUG_STREAM(node_->get_logger(),"Converting TYPE_16UC3 to color");
+    cv::Mat gradientBackground16;
+    gradientBackground.convertTo(gradientBackground16, CV_16UC3);
     colorImage.encoding = sensor_msgs::image_encodings::BGR16;
     colorImage.image = cv::Mat::zeros(height_, width_, 'bgr16');  
     for (int row = 0; row < height_; row++) {
       for (int col = 0; col < width_; col++) {
         if (depthMask.at<uint8_t>(row, col) == 255) {
-          colorImage.image.at<cv::Vec3w>(row, col) = userImage.image.at<cv::Vec3w>(row, col);
+          colorImage.image.at<cv::Vec3w>(row, col) = inputImage.image.at<cv::Vec3w>(row, col);
         }
         else
         {
           // Pixel has no depth data - use gradient background value scaled to 16 bit
-          colorImage.image.at<cv::Vec3w>(row, col) = gradientBackground.at<cv::Vec3b>(row, col) * 257;
+          colorImage.image.at<cv::Vec3b>(row, col) = gradientBackground16.at<cv::Vec3w>(row, col);
         }
       }
     }
-  } else if(userImage.encoding == sensor_msgs::image_encodings::TYPE_8UC3) {
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_8UC3) {
+    RCLCPP_DEBUG_STREAM(node_->get_logger(),"Converting TYPE_8UC3 to color");
     colorImage.encoding = sensor_msgs::image_encodings::BGR8;
     colorImage.image = cv::Mat::zeros(height_, width_, 'bgr8');      
     for (int row = 0; row < height_; row++) {
       for (int col = 0; col < width_; col++) {
         if (depthMask.at<uint8_t>(row, col) == 255) {
-          colorImage.image.at<cv::Vec3b>(row, col) = userImage.image.at<cv::Vec3b>(row, col);
+          colorImage.image.at<cv::Vec3b>(row, col) = inputImage.image.at<cv::Vec3b>(row, col);
         } else {
           // Pixel has no depth data - use gradient background value
           colorImage.image.at<cv::Vec3b>(row, col) = gradientBackground.at<cv::Vec3b>(row, col);
         }
       }
     }    
-  } else if(userImage.encoding == sensor_msgs::image_encodings::TYPE_8UC1) {
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_8UC1) {
+    RCLCPP_DEBUG_STREAM(node_->get_logger(),"Converting TYPE_8UC1 to color");
     colorImage.encoding = sensor_msgs::image_encodings::BGR8;
     colorImage.image = cv::Mat::zeros(height_, width_, 'bgr8');      
     for (int row = 0; row < height_; row++) {
       for (int col = 0; col < width_; col++) {
         if (depthMask.at<uint8_t>(row, col) == 255) {
           // Pixel has real depth data - convert depth to grayscale and display as white/gray
-          float depth_value = userImage.image.at<uint8_t>(row, col);
+          float depth_value = inputImage.image.at<uint8_t>(row, col);
           // Normalize depth to 0-255 range (assuming max depth ~10 meters)
           uint8_t intensity =depth_value; // 10m -> 255
           
@@ -563,14 +661,15 @@ cv_bridge::CvImage PointCloud2Subscriber::ConvertToColor(const cv::Mat &depthMas
         }
       }
     }
-  } else if(userImage.encoding == sensor_msgs::image_encodings::TYPE_8SC1) {
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_8SC1) {
+    RCLCPP_DEBUG_STREAM(node_->get_logger(),"Converting TYPE_8SC1 to color");
     colorImage.encoding = sensor_msgs::image_encodings::BGR8;
     colorImage.image = cv::Mat::zeros(height_, width_, 'bgr8');      
     for (int row = 0; row < height_; row++) {
       for (int col = 0; col < width_; col++) {
         if (depthMask.at<uint8_t>(row, col) == 255) {
           // Pixel has real depth data - convert depth to grayscale and display as white/gray
-          int8_t depth_value = userImage.image.at<int8_t>(row, col);
+          int8_t depth_value = inputImage.image.at<int8_t>(row, col);
           // Normalize depth to 0-255 range
           uint8_t intensity = static_cast<uint8_t>(depth_value + 128);
           
@@ -584,14 +683,17 @@ cv_bridge::CvImage PointCloud2Subscriber::ConvertToColor(const cv::Mat &depthMas
         }
       }
     }
-  } else if(userImage.encoding == sensor_msgs::image_encodings::TYPE_16UC1) {
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_16UC1) {
+    RCLCPP_DEBUG_STREAM(node_->get_logger(),"Converting TYPE_16UC1 to color");
+    cv::Mat gradientBackground16;
+    gradientBackground.convertTo(gradientBackground16, CV_16UC3, 257.0, 0.0);    
     colorImage.encoding = sensor_msgs::image_encodings::BGR16;
     colorImage.image = cv::Mat::zeros(height_, width_, 'bgr16'); 
     for (int row = 0; row < height_; row++) {
       for (int col = 0; col < width_; col++) {
         if (depthMask.at<uint8_t>(row, col) == 255) {
           // Pixel has real depth data - convert depth to grayscale and display as white/gray
-          uint16_t depth_value = userImage.image.at<uint16_t>(row, col);
+          uint16_t depth_value = inputImage.image.at<uint16_t>(row, col);
           // Normalize depth to 0-255 range
           uint16_t intensity = static_cast<uint16_t>(depth_value);
           
@@ -600,17 +702,20 @@ cv_bridge::CvImage PointCloud2Subscriber::ConvertToColor(const cv::Mat &depthMas
           pixel[1] = intensity; // G  
           pixel[2] = intensity; // R (grayscale)
         } else {
-          // Pixel has no depth data - use gradient background value
-          colorImage.image.at<cv::Vec3w>(row, col) = gradientBackground.at<cv::Vec3b>(row, col) * 257;
+          // Pixel has no depth data - use gradient background value scaled to 16 bit
+          colorImage.image.at<cv::Vec3w>(row, col) = gradientBackground16.at<cv::Vec3w>(row, col);
         }
       }
     }
-  } else if(userImage.encoding == sensor_msgs::image_encodings::TYPE_16SC1) {
+  } else if(inputImage.encoding == sensor_msgs::image_encodings::TYPE_16SC1) {
+    RCLCPP_DEBUG_STREAM(node_->get_logger(),"Converting TYPE_16SC1 to color");
+    cv::Mat gradientBackground16;
+    gradientBackground.convertTo(gradientBackground16, CV_16UC3, 257.0, 0.0);        
     for (int row = 0; row < height_; row++) {
       for (int col = 0; col < width_; col++) {
         if (depthMask.at<uint8_t>(row, col) == 255) {
           // Pixel has real depth data - convert depth to grayscale and display as white/gray
-          int16_t depth_value = userImage.image.at<int16_t>(row, col);
+          int16_t depth_value = inputImage.image.at<int16_t>(row, col);
           // Normalize depth to 0-255 range
           uint16_t intensity = static_cast<uint16_t>(depth_value + 32768);
           
@@ -619,13 +724,14 @@ cv_bridge::CvImage PointCloud2Subscriber::ConvertToColor(const cv::Mat &depthMas
           pixel[1] = intensity; // G  
           pixel[2] = intensity; // R (grayscale)
         } else {
-          // Pixel has no depth data - use gradient background value
-          colorImage.image.at<cv::Vec3w>(row, col) = gradientBackground.at<cv::Vec3b>(row, col) * 257;
+          // Pixel has no depth data - use gradient background value scaled to 16 bit
+          colorImage.image.at<cv::Vec3w>(row, col) = gradientBackground16.at<cv::Vec3w>(row, col);
         }
       }
     }    
   } else {
-    colorImage = userImage;
+    RCLCPP_DEBUG_STREAM(node_->get_logger(),"Cannot convert to color: " << inputImage.encoding.c_str());    
+    colorImage = inputImage;
   }
   
   return colorImage;

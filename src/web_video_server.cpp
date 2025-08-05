@@ -63,6 +63,11 @@ WebVideoServer::WebVideoServer(const rclcpp::NodeOptions & options)
   declare_parameter("server_threads", 1);
   declare_parameter("publish_rate", -1.0);
   declare_parameter("default_stream_type", "mjpeg");
+  declare_parameter("wait_for_tf_delay", 0.1);
+  declare_parameter("frame_id", "");
+  declare_parameter("normalize", true);
+  declare_parameter("colorize", true);
+  declare_parameter("field", "depth");
 
   get_parameter("port", port_);
   get_parameter("verbose", verbose_);

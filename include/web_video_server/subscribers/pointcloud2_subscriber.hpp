@@ -46,16 +46,17 @@ class PointCloud2Subscriber : public RosSubscriber
     sensor_msgs::msg::PointCloud2 TransformFrame(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg, std::string frame_id);
     void GatherCameraInfo(cv::Mat &intrinsic_matrix, cv::Mat &distortion_coefficients);           
     bool CreateUserImage(const std_msgs::msg::Header &cloud_header, const sensor_msgs::msg::PointField &userField, cv_bridge::CvImage &userImage);
-    bool CreateDepthImage(const std_msgs::msg::Header &cloud_header, const sensor_msgs::msg::PointField &userField, cv_bridge::CvImage& depthImage);
+    bool CreateDepthImage(const std_msgs::msg::Header &cloud_header, cv_bridge::CvImage& depthImage);
     std::vector<cv::Point2f> ProjectPoints(const sensor_msgs::msg::PointCloud2 &output_cloud, 
             const sensor_msgs::msg::PointField &xField, const sensor_msgs::msg::PointField &yField, const sensor_msgs::msg::PointField &zField, 
             const cv::Mat &intrinsic_matrix, const cv::Mat &distortion_coefficients, std::vector<cv::Point3f> &obj_pts);
-    cv_bridge::CvImage ConvertToColor(const cv::Mat &depthMask, const cv_bridge::CvImage &depthImage, const cv_bridge::CvImage &userImage);
+    cv_bridge::CvImage NormalizeImage(const cv_bridge::CvImage &inputImage);
+    cv_bridge::CvImage ConvertToColor(const cv::Mat &depthMask, const cv_bridge::CvImage &inputImage);
 
   private:
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ros_sub_;
 
-    std::shared_ptr<tf2_ros::TransformListener> tf_listener_{nullptr};
+    std::unique_ptr<tf2_ros::TransformListener> tf_listener_{nullptr};
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
 
     geometry_msgs::msg::TransformStamped transform_optical_;
@@ -65,7 +66,9 @@ class PointCloud2Subscriber : public RosSubscriber
     std::string field_;
     int height_, width_, pixel_size_;
     double focal_length_;
-    bool background_;
+    bool normalize_;
+    bool colorize_;
+	  rclcpp::CallbackGroup::SharedPtr cbg_sub_;    
 };
 
 class PointCloud2SubscriberType : public SubscriberType
