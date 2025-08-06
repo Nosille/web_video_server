@@ -58,6 +58,7 @@ ImageStreamer::ImageStreamer(
 
 ImageStreamer::~ImageStreamer()
 {
+  std::scoped_lock lock(send_mutex_);  // protects sendImage.
 }
 
 void ImageStreamer::start()
@@ -134,7 +135,7 @@ cv::Mat ImageStreamer::decodeImage(
            msg->encoding == sensor_msgs::image_encodings::TYPE_8SC1||
            msg->encoding == sensor_msgs::image_encodings::TYPE_16UC1||
            msg->encoding == sensor_msgs::image_encodings::TYPE_16SC1) {
-    RCLCPP_INFO(node_->get_logger(), "Greyscale format: %s", msg->encoding.c_str());
+    RCLCPP_DEBUG(node_->get_logger(), "Greyscale format: %s", msg->encoding.c_str());
     cv::Mat image_bridge = cv_bridge::toCvCopy(msg, msg->encoding.c_str())->image;
     cv::Mat normalized_image;
     cv::normalize(image_bridge, normalized_image, 0, 255, cv::NORM_MINMAX);
@@ -143,7 +144,7 @@ cv::Mat ImageStreamer::decodeImage(
   }
   // Handle floating point images
   else if (msg->encoding.find("F") != std::string::npos) {
-    RCLCPP_INFO(node_->get_logger(), "Floating point format: %s", msg->encoding.c_str());    
+    RCLCPP_DEBUG(node_->get_logger(), "Floating point format: %s", msg->encoding.c_str());    
     // scale floating point images
     cv::Mat float_image_bridge = cv_bridge::toCvCopy(msg, msg->encoding)->image;
     cv::Mat_<float> float_image = float_image_bridge;

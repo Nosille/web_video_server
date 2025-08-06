@@ -56,6 +56,8 @@ LibavStreamer::LibavStreamer(
 
 LibavStreamer::~LibavStreamer()
 {
+  std::scoped_lock lock(send_mutex_); 
+  
   if (codec_context_) {
     avcodec_free_context(&codec_context_);
   }

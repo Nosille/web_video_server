@@ -44,8 +44,8 @@ RosCompressedStreamer::RosCompressedStreamer(
 
 RosCompressedStreamer::~RosCompressedStreamer()
 {
-  this->inactive_ = true;
   std::scoped_lock lock(send_mutex_);  // protects sendImage.
+  this->inactive_ = true;
 }
 
 void RosCompressedStreamer::start()
