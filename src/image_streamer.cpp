@@ -59,6 +59,17 @@ ImageStreamer::ImageStreamer(
 ImageStreamer::~ImageStreamer()
 {
   std::scoped_lock lock(send_mutex_);  // protects sendImage.
+  
+  // Clear the subscriber callback to prevent use-after-free
+  if (subscriber_) {
+    // Set callback to empty function to avoid calling destroyed ImageStreamer
+    subscriber_->subscribe(
+      request_, topic_, 
+      [](const sensor_msgs::msg::Image::ConstSharedPtr&) {
+        // Empty callback - do nothing
+      }
+    );
+  }
 }
 
 void ImageStreamer::start()
