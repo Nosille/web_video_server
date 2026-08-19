@@ -152,7 +152,10 @@ void PointCloud2Subscriber::subscriber_callback(
   // Find relevant fields
   sensor_msgs::msg::PointField xField, yField, zField, userField;  
   userField.name = field_;
-  if(!FindFields(input_msg, userField, xField, yField, zField)) return;
+  if(!FindFields(input_msg, userField, xField, yField, zField) && field_ != "depth") {
+    RCLCPP_WARN_STREAM_THROTTLE(logger_, *node_->get_clock(), 1000, "Field not found: " << field_);
+    return;
+  }
 
   // Setup camera_info
   RCLCPP_DEBUG_STREAM(logger_,"    Camera Info");
@@ -167,7 +170,10 @@ void PointCloud2Subscriber::subscriber_callback(
   // Setup user image
   RCLCPP_DEBUG_STREAM(logger_,"    User-Datatype: " << +userField.datatype);
   cv_bridge::CvImage userImage;
-  if(!CreateUserImage(output_cloud.header, userField, userImage)) return;
+  if(!CreateUserImage(output_cloud.header, userField, userImage)) {
+    RCLCPP_WARN_STREAM_THROTTLE(logger_, *node_->get_clock(), 1000, "Failed to create user image!");    
+    return;
+  }
   
   // Project Points
    RCLCPP_DEBUG_STREAM(logger_,"  Project points");        
@@ -286,7 +292,7 @@ void PointCloud2Subscriber::subscriber_callback(
 
   // Normalize
   cv_bridge::CvImage normalized_image;  
-    if (field_ == "depth") { 
+    if (field_ == "depth") {
     normalized_image = depthImage; 
   } else if (normalize_) { 
     normalized_image = NormalizeImage(userImage); 
