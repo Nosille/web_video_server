@@ -40,20 +40,26 @@ namespace web_video_server
 {
 namespace subscribers
 {
-PointCloud2Subscriber::PointCloud2Subscriber(rclcpp::Node::SharedPtr node)
-: SubscriberBase(node, "pointcloud2_subscriber")
+PointCloud2Subscriber::PointCloud2Subscriber(rclcpp::Node::WeakPtr _node)
+: SubscriberBase(_node, "pointcloud2_subscriber")
 {
+  auto node = lock_node();
+  if (!node) {
+    inactive_ = true;
+    return;
+  }
+
   std::scoped_lock lock(subscriber_mutex);
 
-  if (!node_->has_parameter("frame_id")) node_->declare_parameter("frame_id", "base_link");
-  if (!node_->has_parameter("wait_for_tf_delay")) node_->declare_parameter("wait_for_tf_delay", 0.1);
-  if (!node_->has_parameter("colorize")) node_->declare_parameter("colorize", true);
-  if (!node_->has_parameter("normalize")) node_->declare_parameter("normalize", true);
-  if (!node_->has_parameter("field")) node_->declare_parameter("field", "depth");
+  if (!node->has_parameter("frame_id")) node->declare_parameter("frame_id", "base_link");
+  if (!node->has_parameter("wait_for_tf_delay")) node->declare_parameter("wait_for_tf_delay", 0.1);
+  if (!node->has_parameter("colorize")) node->declare_parameter("colorize", true);
+  if (!node->has_parameter("normalize")) node->declare_parameter("normalize", true);
+  if (!node->has_parameter("field")) node->declare_parameter("field", "depth");
 
   // Initialize our TF items
-  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node_->get_clock(), std::chrono::seconds(10));
-  tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_, node_, true);
+  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node->get_clock(), std::chrono::seconds(10));
+  tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_, node, true);
   
   tf2::Quaternion q;
   q.setRPY(M_PI / 2.0, - M_PI / 2.0, 0.0);
@@ -76,26 +82,32 @@ void PointCloud2Subscriber::subscribe(const async_web_server_cpp::HttpRequest &r
                                          const std::string& topic, 
                                          const ImageCallback& callback)
 {
+  auto node = lock_node();
+  if (!node) {
+    inactive_ = true;
+    return;
+  }
+  
   std::scoped_lock lock(subscriber_mutex);
 
   callback_ = callback;
-  std::string default_qos_profile = node_->get_parameter("default_qos_profile").as_string();    
+  std::string default_qos_profile = node->get_parameter("default_qos_profile").as_string();    
   auto qos_profile_name = request.get_query_param_value_or_default("qos_profile", default_qos_profile);
 
-  wait_for_tf_delay_ = node_->get_parameter("wait_for_tf_delay").as_double();
+  wait_for_tf_delay_ = node->get_parameter("wait_for_tf_delay").as_double();
   wait_for_tf_delay_ = request.get_query_param_value_or_default("wait_for_tf_delay", wait_for_tf_delay_);
   
   
-  std::string default_frame_id = node_->get_parameter("frame_id").as_string();
+  std::string default_frame_id = node->get_parameter("frame_id").as_string();
   frame_id_ = request.get_query_param_value_or_default("frame_id", default_frame_id);
   
-  bool default_color = node_->get_parameter("colorize").as_bool();
+  bool default_color = node->get_parameter("colorize").as_bool();
   colorize_ = request.get_query_param_value_or_default<bool>("colorize", default_color); 
 
-  bool default_normalize = node_->get_parameter("normalize").as_bool();
+  bool default_normalize = node->get_parameter("normalize").as_bool();
   normalize_ = request.get_query_param_value_or_default<bool>("normalize", default_normalize);
 
-  std::string default_field = node_->get_parameter("field").as_string();
+  std::string default_field = node->get_parameter("field").as_string();
   field_ = request.get_query_param_value_or_default("field", default_field);
   
   height_ = request.get_query_param_value_or_default<int>("height", 600);
@@ -120,11 +132,11 @@ void PointCloud2Subscriber::subscribe(const async_web_server_cpp::HttpRequest &r
     rclcpp::QoSInitialization(qos_profile.value().history, 1),
     qos_profile.value());
 
-  cbg_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);    
+  cbg_ = node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);    
   rclcpp::SubscriptionOptions options;
   options.callback_group = cbg_;  
   
-  sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
+  sub_ = node->create_subscription<sensor_msgs::msg::PointCloud2>(
     topic, qos, std::bind(&PointCloud2Subscriber::subscriber_callback, this, std::placeholders::_1), options
   );
 }
@@ -138,7 +150,7 @@ void PointCloud2Subscriber::subscriber_callback(
 
   if (input_msg->data.size() == 0)
   {
-    RCLCPP_WARN_STREAM_THROTTLE(logger_, *node_->get_clock(), 1000, "No data in pointcloud!");
+    RCLCPP_WARN_STREAM_THROTTLE(logger_, *clock_, 1000, "No data in pointcloud!");
     return;
   }
 
@@ -153,7 +165,7 @@ void PointCloud2Subscriber::subscriber_callback(
   sensor_msgs::msg::PointField xField, yField, zField, userField;  
   userField.name = field_;
   if(!FindFields(input_msg, userField, xField, yField, zField) && field_ != "depth") {
-    RCLCPP_WARN_STREAM_THROTTLE(logger_, *node_->get_clock(), 1000, "Field not found: " << field_);
+    RCLCPP_WARN_STREAM_THROTTLE(logger_, *clock_, 1000, "Field not found: " << field_);
     return;
   }
 
@@ -171,7 +183,7 @@ void PointCloud2Subscriber::subscriber_callback(
   RCLCPP_DEBUG_STREAM(logger_,"    User-Datatype: " << +userField.datatype);
   cv_bridge::CvImage userImage;
   if(!CreateUserImage(output_cloud.header, userField, userImage)) {
-    RCLCPP_WARN_STREAM_THROTTLE(logger_, *node_->get_clock(), 1000, "Failed to create user image!");    
+    RCLCPP_WARN_STREAM_THROTTLE(logger_, *clock_, 1000, "Failed to create user image!");    
     return;
   }
   
@@ -541,7 +553,7 @@ std::vector<cv::Point2f> PointCloud2Subscriber::ProjectPoints(const sensor_msgs:
     if (x_access + 4 > output_cloud.data.size() ||
         y_access + 4 > output_cloud.data.size() ||
         z_access + 4 > output_cloud.data.size()) {
-      RCLCPP_WARN_STREAM_THROTTLE(logger_, *node_->get_clock(), 1000, 
+      RCLCPP_WARN_STREAM_THROTTLE(logger_, *clock_, 1000, 
                                    "Buffer access out of bounds for point " << i << ", skipping point");
       continue;
     }

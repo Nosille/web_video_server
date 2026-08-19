@@ -53,7 +53,7 @@ namespace subscribers
 class PointCloud2Subscriber : public SubscriberBase
 {    
   public:
-    PointCloud2Subscriber(rclcpp::Node::SharedPtr node);
+    PointCloud2Subscriber(rclcpp::Node::WeakPtr node);
 
     ~PointCloud2Subscriber();
 
