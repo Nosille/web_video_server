@@ -16,6 +16,11 @@ find_package(rclcpp_components REQUIRED)
 find_package(rmw REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_sensor_msgs REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+
 find_package(OpenCV REQUIRED)
 find_package(Boost REQUIRED)
 
@@ -107,6 +112,7 @@ target_link_libraries(${PROJECT_NAME}_streamers
 
 add_library(${PROJECT_NAME}_subscribers SHARED
   src/subscribers/image_transport_subscriber.cpp
+  src/subscribers/pointcloud2_subscriber.cpp  
 )
 
 target_include_directories(${PROJECT_NAME}_subscribers
@@ -118,10 +124,22 @@ target_include_directories(${PROJECT_NAME}_subscribers
 target_link_libraries(${PROJECT_NAME}_subscribers
   ${PROJECT_NAME}
   async_web_server_cpp::async_web_server_cpp
+  cv_bridge::cv_bridge
   image_transport::image_transport
   pluginlib::pluginlib
   rclcpp::rclcpp
+  tf2::tf2
+  tf2_ros::tf2_ros
+  tf2_sensor_msgs::tf2_sensor_msgs
+  tf2_geometry_msgs::tf2_geometry_msgs
   ${sensor_msgs_TARGETS}
+  Boost::boost
+  Boost::system
+  ${OpenCV_LIBS}
+  ${avcodec_LIBRARIES}
+  ${avformat_LIBRARIES}
+  ${avutil_LIBRARIES}
+  ${swscale_LIBRARIES}
 )
 
 ## Declare a cpp executable
