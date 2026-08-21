@@ -64,6 +64,7 @@ class PointCloud2Subscriber : public SubscriberBase
 
   private:
     void subscriber_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg);
+    void ProcessCloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg);    
 
     static bool compareFieldsOffset(sensor_msgs::msg::PointField& field1, sensor_msgs::msg::PointField& field2);
     static inline int sizeOfPointField(int datatype);    
@@ -73,8 +74,8 @@ class PointCloud2Subscriber : public SubscriberBase
     void GatherCameraInfo(cv::Mat &intrinsic_matrix, cv::Mat &distortion_coefficients);           
     bool CreateUserImage(const std_msgs::msg::Header &cloud_header, const sensor_msgs::msg::PointField &userField, cv_bridge::CvImage &userImage);
     bool CreateDepthImage(const std_msgs::msg::Header &cloud_header, cv_bridge::CvImage& depthImage);
-    std::vector<cv::Point2f> ProjectPoints(const sensor_msgs::msg::PointCloud2 &output_cloud, 
-            const sensor_msgs::msg::PointField &xField, const sensor_msgs::msg::PointField &yField, const sensor_msgs::msg::PointField &zField, 
+    std::vector<cv::Point2f> ProjectPoints(const sensor_msgs::msg::PointCloud2 &output_cloud,
+            const sensor_msgs::msg::PointField &xField, const sensor_msgs::msg::PointField &yField, const sensor_msgs::msg::PointField &zField,
             const cv::Mat &intrinsic_matrix, const cv::Mat &distortion_coefficients, std::vector<cv::Point3f> &obj_pts);
     cv_bridge::CvImage NormalizeImage(const cv_bridge::CvImage &inputImage);
     cv_bridge::CvImage ConvertToColor(const cv::Mat &depthMask, const cv_bridge::CvImage &inputImage);            
@@ -107,5 +108,5 @@ class PointCloud2SubscriberFactory : public SubscriberFactoryInterface
     std::vector<std::string> get_available_topics(rclcpp::Node & node);
 };
 
-}  // namespace streamers
+}  // namespace subscribers
 }  // namespace web_video_server
