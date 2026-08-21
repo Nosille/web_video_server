@@ -35,8 +35,10 @@
 #include <memory>
 
 #include "rclcpp/node.hpp"
-#include "rclcpp/clock.hpp"
+#include "rclcpp/time.hpp"
 #include "rclcpp/logging.hpp"
+
+#include "rcl/time.h"
 
 namespace web_video_server
 {
