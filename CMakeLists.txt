@@ -133,8 +133,6 @@ target_link_libraries(${PROJECT_NAME}_subscribers
   tf2_sensor_msgs::tf2_sensor_msgs
   tf2_geometry_msgs::tf2_geometry_msgs
   ${sensor_msgs_TARGETS}
-  Boost::boost
-  Boost::system
   ${OpenCV_LIBS}
   ${avcodec_LIBRARIES}
   ${avformat_LIBRARIES}

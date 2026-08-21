@@ -63,8 +63,17 @@ class PointCloud2Subscriber : public SubscriberBase
     
 
   private:
+    void try_forward_image(const sensor_msgs::msg::Image::ConstSharedPtr & input_msg)
+    {
+        try {
+        callback_(input_msg);
+        } catch (...) {
+        RCLCPP_ERROR(logger_, "The subscriber plugin failed send image for some reason.");
+        }
+    }
+
     void subscriber_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg);
-    void ProcessCloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg);    
+    sensor_msgs::msg::Image::SharedPtr ProcessCloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg);    
 
     static bool compareFieldsOffset(sensor_msgs::msg::PointField& field1, sensor_msgs::msg::PointField& field2);
     static inline int sizeOfPointField(int datatype);    
@@ -78,7 +87,8 @@ class PointCloud2Subscriber : public SubscriberBase
             const sensor_msgs::msg::PointField &xField, const sensor_msgs::msg::PointField &yField, const sensor_msgs::msg::PointField &zField,
             const cv::Mat &intrinsic_matrix, const cv::Mat &distortion_coefficients, std::vector<cv::Point3f> &obj_pts);
     cv_bridge::CvImage NormalizeImage(const cv_bridge::CvImage &inputImage);
-    cv_bridge::CvImage ConvertToColor(const cv::Mat &depthMask, const cv_bridge::CvImage &inputImage);            
+    cv_bridge::CvImage ConvertToColor(const cv::Mat &depthMask, const cv_bridge::CvImage &inputImage);  
+    size_t UserFieldBytes(const sensor_msgs::msg::PointField &field);          
 
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_;
 

@@ -60,9 +60,6 @@ public:
     const async_web_server_cpp::HttpRequest & request,
     const std::string & topic,
     const ImageCallback & callback) = 0;
-
-protected:
-  virtual void subscriber_callback(const sensor_msgs::msg::Image::ConstSharedPtr & input_msg) = 0;
 };
 
 /**

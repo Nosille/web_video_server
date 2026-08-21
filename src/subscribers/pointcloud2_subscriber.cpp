@@ -34,6 +34,7 @@
 
 #include "rclcpp/node.hpp"
 #include "rclcpp/logging.hpp"
+#include "rclcpp/qos.hpp"
 #include "rmw/qos_profiles.h"
 
 #include "async_web_server_cpp/http_request.hpp"
@@ -45,26 +46,36 @@ namespace web_video_server
 {
 namespace subscribers
 {
-PointCloud2Subscriber::PointCloud2Subscriber(rclcpp::Node::WeakPtr _node)
-: SubscriberBase(_node, "pointcloud2_subscriber")
+PointCloud2Subscriber::PointCloud2Subscriber(rclcpp::Node::WeakPtr node)
+: SubscriberBase(node, "pointcloud2_subscriber")
 {
-  auto node = lock_node();
-  if (!node) {
+  auto node_ptr = lock_node();
+  if (!node_ptr) {
     inactive_ = true;
     return;
   }
 
   std::scoped_lock lock(subscriber_mutex_);
 
-  if (!node->has_parameter("frame_id")) node->declare_parameter("frame_id", "base_link");
-  if (!node->has_parameter("wait_for_tf_delay")) node->declare_parameter("wait_for_tf_delay", 0.1);
-  if (!node->has_parameter("colorize")) node->declare_parameter("colorize", true);
-  if (!node->has_parameter("normalize")) node->declare_parameter("normalize", true);
-  if (!node->has_parameter("field")) node->declare_parameter("field", "depth");
+  if (!node_ptr->has_parameter("frame_id")) {
+    node_ptr->declare_parameter("frame_id", "base_link");
+  }
+  if (!node_ptr->has_parameter("wait_for_tf_delay")) {
+    node_ptr->declare_parameter("wait_for_tf_delay", 0.1);
+  }
+  if (!node_ptr->has_parameter("colorize")) {
+    node_ptr->declare_parameter("colorize", true);
+  }
+  if (!node_ptr->has_parameter("normalize")) {
+    node_ptr->declare_parameter("normalize", true);
+  }
+  if (!node_ptr->has_parameter("field")) {
+    node_ptr->declare_parameter("field", "depth");
+  }
 
   // Initialize our TF items
-  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node->get_clock(), std::chrono::seconds(10));
-  tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_, node, true);
+  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node_ptr->get_clock(), std::chrono::seconds(10));
+  tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_, node_ptr, true);
   
   tf2::Quaternion q;
   q.setRPY(M_PI / 2.0, - M_PI / 2.0, 0.0);
@@ -83,9 +94,10 @@ PointCloud2Subscriber::~PointCloud2Subscriber()
   inactive_ = true;
 }
 
-void PointCloud2Subscriber::subscribe(const async_web_server_cpp::HttpRequest &request,
-                                         const std::string& topic, 
-                                         const ImageCallback& callback)
+void PointCloud2Subscriber::subscribe(
+  const async_web_server_cpp::HttpRequest &request,
+  const std::string& topic, 
+  const ImageCallback& callback)
 {
   auto node = lock_node();
   if (!node) {
@@ -96,12 +108,13 @@ void PointCloud2Subscriber::subscribe(const async_web_server_cpp::HttpRequest &r
   std::scoped_lock lock(subscriber_mutex_);
 
   callback_ = callback;
-  std::string default_qos_profile = node->get_parameter("default_qos_profile").as_string();    
-  auto qos_profile_name = request.get_query_param_value_or_default("qos_profile", default_qos_profile);
-
+  const std::string default_qos_profile = node->get_parameter("default_qos_profile").as_string();
+  auto qos_profile_name = request.get_query_param_value_or_default(
+    "qos_profile",
+    default_qos_profile);
+    
   wait_for_tf_delay_ = node->get_parameter("wait_for_tf_delay").as_double();
   wait_for_tf_delay_ = request.get_query_param_value_or_default("wait_for_tf_delay", wait_for_tf_delay_);
-  
   
   std::string default_frame_id = node->get_parameter("frame_id").as_string();
   frame_id_ = request.get_query_param_value_or_default("frame_id", default_frame_id);
@@ -126,29 +139,28 @@ void PointCloud2Subscriber::subscribe(const async_web_server_cpp::HttpRequest &r
     qos_profile_name.c_str());
   auto qos_profile = get_qos_profile_from_name(qos_profile_name);
   if (!qos_profile) {
-    qos_profile = rmw_qos_profile_default;
+    qos_profile = rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_default));
     RCLCPP_ERROR(
       logger_,
       "Invalid QoS profile %s specified. Using default profile.",
       qos_profile_name.c_str());
   }
 
-  const auto qos = rclcpp::QoS(
-    rclcpp::QoSInitialization(qos_profile.value().history, 1),
-    qos_profile.value());
-
   cbg_ = node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);    
   rclcpp::SubscriptionOptions options;
   options.callback_group = cbg_;  
   
   sub_ = node->create_subscription<sensor_msgs::msg::PointCloud2>(
-    topic, qos, std::bind(&PointCloud2Subscriber::subscriber_callback, this, std::placeholders::_1), options
+    topic, qos_profile.value(), 
+    std::bind(&PointCloud2Subscriber::subscriber_callback, this, std::placeholders::_1), 
+    options
   );
 }
 
 void PointCloud2Subscriber::subscriber_callback(
   const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg)
 {
+  RCLCPP_DEBUG_STREAM(logger_, "subscriber_callback: ");  
   std::scoped_lock lock(subscriber_mutex_);
 
   if(inactive_) return;
@@ -161,7 +173,13 @@ void PointCloud2Subscriber::subscriber_callback(
 
   try
   {
-    ProcessCloud(input_msg);
+    RCLCPP_DEBUG_STREAM(logger_, "ProcessCloud");  
+    sensor_msgs::msg::Image::ConstSharedPtr output_msg = ProcessCloud(input_msg);
+    RCLCPP_DEBUG_STREAM(logger_, "Finished ProcessCloud");  
+    if(output_msg) {
+      RCLCPP_DEBUG_STREAM(logger_, "try_forward_image");        
+      try_forward_image(output_msg);
+    }
   }
   catch (const cv::Exception &e)
   {
@@ -173,13 +191,15 @@ void PointCloud2Subscriber::subscriber_callback(
   }
 }
 
-void PointCloud2Subscriber::ProcessCloud(
+sensor_msgs::msg::Image::SharedPtr PointCloud2Subscriber::ProcessCloud(
   const sensor_msgs::msg::PointCloud2::ConstSharedPtr &input_msg)
 {
   // Start timer
   auto beginTime = std::chrono::steady_clock::now();
+  sensor_msgs::msg::Image::SharedPtr output_msg;
 
   //transform
+  RCLCPP_DEBUG_STREAM(logger_, "TransformFrame");    
   sensor_msgs::msg::PointCloud2 output_cloud; 
   output_cloud = TransformFrame(input_msg, frame_id_);
 
@@ -187,19 +207,20 @@ void PointCloud2Subscriber::ProcessCloud(
   if (output_cloud.point_step == 0 || output_cloud.width == 0 || output_cloud.height == 0)
   {
     RCLCPP_WARN_STREAM_THROTTLE(logger_, *clock_, 1000, "Malformed pointcloud: zero dimensions or point_step!");
-    return;
+    return output_msg;
   }  
   else if (output_cloud.data.size() < output_cloud.height * output_cloud.width * output_cloud.point_step) {
     RCLCPP_WARN_STREAM_THROTTLE(logger_, *clock_, 1000, "Malformed pointcloud: data buffer smaller than declared dimensions!");
-    return;
+    return output_msg;
   }
 
   // Find relevant fields
+  RCLCPP_DEBUG_STREAM(logger_, "FindFields");      
   sensor_msgs::msg::PointField xField, yField, zField, userField;
   userField.name = field_;
   if(!FindFields(input_msg, userField, xField, yField, zField)) {
     RCLCPP_WARN_STREAM_THROTTLE(logger_, *clock_, 1000, "Required fields not found in pointcloud (field: " << field_ << ")");
-    return;
+    return output_msg;
   }
   const size_t user_bytes = UserFieldBytes(userField);
   if (xField.offset + sizeof(float) > output_cloud.point_step ||
@@ -208,36 +229,36 @@ void PointCloud2Subscriber::ProcessCloud(
       (user_bytes > 0 && userField.offset + user_bytes > output_cloud.point_step))
   {
     RCLCPP_WARN_STREAM_THROTTLE(logger_, *clock_, 1000, "Malformed pointcloud: field offsets exceed point_step!");
-    return;
+    return output_msg;
   }
 
   // Setup camera_info
-  RCLCPP_DEBUG_STREAM(logger_,"    Camera Info");
+  RCLCPP_DEBUG_STREAM(logger_,"Camera Info");
   cv::Mat intrinsic_matrix, distortion_coefficients;
   GatherCameraInfo(intrinsic_matrix, distortion_coefficients);
   
   // Setup depth image
-  RCLCPP_DEBUG_STREAM(logger_,"    Depth");           
+  RCLCPP_DEBUG_STREAM(logger_,"Depth");           
   cv_bridge::CvImage depthImage;
   CreateDepthImage(output_cloud.header, depthImage);
   
   // Setup user image
-  RCLCPP_DEBUG_STREAM(logger_,"    User-Datatype: " << +userField.datatype);
+  RCLCPP_DEBUG_STREAM(logger_,"User-Datatype: " << +userField.datatype);
   cv_bridge::CvImage userImage;
   if(!CreateUserImage(output_cloud.header, userField, userImage)) {
     RCLCPP_WARN_STREAM_THROTTLE(logger_, *clock_, 1000, "Failed to create user image!");    
-    return;
+    return output_msg;
   }
   
   // Project Points
-   RCLCPP_DEBUG_STREAM(logger_,"  Project points");        
+   RCLCPP_DEBUG_STREAM(logger_,"Project points");        
   std::vector<cv::Point3f> obj_pts;
   std::vector<cv::Point2f> img_pts = ProjectPoints(output_cloud, xField, yField, zField, intrinsic_matrix, distortion_coefficients, obj_pts);
 
   // Process projected points and render to image
   cv::Mat depthMask = cv::Mat::zeros(height_, width_, CV_8UC1);
   // Loop through points and fillout user and depth images
-  RCLCPP_DEBUG_STREAM(logger_,"  Process projected points: " << img_pts.size());     
+  RCLCPP_DEBUG_STREAM(logger_,"Process projected points: " << img_pts.size());     
   for (size_t i = 0; i < img_pts.size(); ++i)
   {
     // Check if inflated point is inside field of view.
@@ -351,28 +372,10 @@ void PointCloud2Subscriber::ProcessCloud(
   depthImage.image.setTo(0.0f, depthMask == 0);
 
   // Normalize
+  RCLCPP_DEBUG_STREAM(logger_,"Normalize");  
   cv_bridge::CvImage normalized_image;
-  if (field_ == "depth") {
-    if (normalize_ && cv::countNonZero(depthMask) > 0) {
-      // Spread the valid depths across the 0..100 range that ConvertToColor
-      // maps onto 0..255, instead of the fixed 100 m scale that rendered
-      // nearby scenes nearly black.
-      double min_v = 0.0, max_v = 0.0;
-      cv::minMaxLoc(depthImage.image, &min_v, &max_v, nullptr, nullptr, depthMask);
-      normalized_image.header = depthImage.header;
-      normalized_image.encoding = depthImage.encoding;
-      if (max_v > min_v) {
-        normalized_image.image =
-          (depthImage.image - static_cast<float>(min_v)) * static_cast<float>(100.0 / (max_v - min_v));
-        normalized_image.image.setTo(0.0f, depthMask == 0);
-      } else {
-        // Single-depth scene: render valid pixels mid-scale
-        normalized_image.image = cv::Mat::zeros(height_, width_, CV_32FC1);
-        normalized_image.image.setTo(50.0f, depthMask);
-      }
-    } else {
-      normalized_image = depthImage;
-    }
+  if (field_ == "depth" && normalize_) {
+    normalized_image = NormalizeImage(depthImage);
   } else if (normalize_) {
     normalized_image = NormalizeImage(userImage);
   } else {
@@ -380,6 +383,7 @@ void PointCloud2Subscriber::ProcessCloud(
   }
 
   // Convert to color
+  RCLCPP_DEBUG_STREAM(logger_,"Convert to color");    
   cv_bridge::CvImage colorImage;
   if (colorize_) {
     colorImage = ConvertToColor(depthMask, normalized_image);
@@ -392,12 +396,10 @@ void PointCloud2Subscriber::ProcessCloud(
   auto totalTime = endTime - beginTime;
   auto timeMS = std::chrono::duration_cast<std::chrono::milliseconds>(totalTime);
   RCLCPP_DEBUG_STREAM(logger_, "Processing time: " << timeMS.count() << "ms");
-  sensor_msgs::msg::Image output_msg;
-  colorImage.toImageMsg(output_msg);
-  sensor_msgs::msg::Image::ConstSharedPtr output_ptr = std::make_shared<sensor_msgs::msg::Image>(output_msg);
-  try_forward_image(output_ptr);
+  output_msg = std::make_shared<sensor_msgs::msg::Image>();
+  colorImage.toImageMsg(*output_msg);
 
-  return;
+  return output_msg;
 }
 
 bool PointCloud2Subscriber::compareFieldsOffset(sensor_msgs::msg::PointField& field1, sensor_msgs::msg::PointField& field2)
@@ -706,9 +708,7 @@ cv_bridge::CvImage PointCloud2Subscriber::ConvertToColor(const cv::Mat &depthMas
   // Composite the final image by blending data with gradient background
   // Where mask == 255 (has data): use actual data values
   // Where mask == 0 (no data): use gradient background values
-  RCLCPP_DEBUG_STREAM(logger_, "  Final Compositing");
   // Setup color image
-   RCLCPP_DEBUG_STREAM(logger_,"    Color");        
   cv_bridge::CvImage colorImage;
   colorImage.header = inputImage.header;
   if(frame_id_ != "") colorImage.header.frame_id = frame_id_;  
@@ -893,8 +893,8 @@ std::shared_ptr<SubscriberInterface> PointCloud2SubscriberFactory::create_subscr
 }
 
 std::vector<std::string> PointCloud2SubscriberFactory::get_available_topics(
-  rclcpp::Node & node
-) {
+  rclcpp::Node & node) 
+{
   std::vector<std::string> result;
   auto topic_names_and_types = node.get_topic_names_and_types();
   for (const auto & topic_and_types : topic_names_and_types) {
