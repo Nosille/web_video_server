@@ -114,7 +114,7 @@ public:
    * @param node The ROS2 node to use for discovering topics.
    * @return A vector of topic names.
    */
-  virtual std::vector<std::string> get_available_topics(rclcpp::Node & node);
+  virtual std::vector<std::string> get_available_topics(rclcpp::Node & node) = 0;
 };
 
 } // end namespace web_video_server
